@@ -1,0 +1,164 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: workchat
+      POSTGRES_USER: workchat
+      POSTGRES_PASSWORD: workchat
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workchat -d workchat"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-19000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-19001}:9001"
+    volumes:
+      - minio_data:/data
+
+  agent-grpc:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    command: ["python", "-m", "agent.grpc_main"]
+    environment:
+      AGENT_GRPC_BIND: 0.0.0.0:50051
+      AGENT_DATABASE_URL: postgres://workchat:workchat@postgres:5432/workchat
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-local}
+      LLM_MODEL: ${LLM_MODEL:-Qwen3.5-4B}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:11434/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-local}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      AGENT_ALLOW_EXTRACTIVE_FALLBACK: ${AGENT_ALLOW_EXTRACTIVE_FALLBACK:-true}
+    ports:
+      - "50051:50051"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  agent-http:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    command: ["python", "-m", "agent.http_main"]
+    environment:
+      AGENT_HTTP_BIND: 0.0.0.0
+      AGENT_HTTP_PORT: 8081
+      AGENT_DATABASE_URL: postgres://workchat:workchat@postgres:5432/workchat
+      AGENT_TENANT_ID: ${TENANT_ID:-00000000-0000-0000-0000-000000000001}
+      AGENT_ADMIN_TOKEN: ${AGENT_ADMIN_TOKEN:-local-dev-token}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: workchat-documents
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:11434/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-local}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      AGENT_ALLOW_EXTRACTIVE_FALLBACK: ${AGENT_ALLOW_EXTRACTIVE_FALLBACK:-true}
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.go-service
+      args:
+        TARGET: gateway
+    environment:
+      GATEWAY_HTTP_ADDR: :8080
+      DATABASE_URL: postgres://workchat:workchat@postgres:5432/workchat?sslmode=disable
+      REDIS_ADDR: redis:6379
+      AGENT_GRPC_ADDR: agent-grpc:50051
+      TENANT_ID: ${TENANT_ID:-00000000-0000-0000-0000-000000000001}
+      WECOM_CORP_ID: ${WECOM_CORP_ID:-}
+      WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
+      WECOM_CALLBACK_TOKEN: ${WECOM_CALLBACK_TOKEN:-}
+      WECOM_ENCODING_AES_KEY: ${WECOM_ENCODING_AES_KEY:-}
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-18080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  dispatcher:
+    build:
+      context: .
+      dockerfile: Dockerfile.go-service
+      args:
+        TARGET: dispatcher
+    environment:
+      DATABASE_URL: postgres://workchat:workchat@postgres:5432/workchat?sslmode=disable
+      REDIS_ADDR: redis:6379
+      AGENT_GRPC_ADDR: agent-grpc:50051
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      agent-grpc:
+        condition: service_started
+
+  outbound:
+    profiles: ["wecom"]
+    build:
+      context: .
+      dockerfile: Dockerfile.go-service
+      args:
+        TARGET: outbound
+    environment:
+      DATABASE_URL: postgres://workchat:workchat@postgres:5432/workchat?sslmode=disable
+      REDIS_ADDR: redis:6379
+      WECOM_API_BASE_URL: ${WECOM_API_BASE_URL:-https://qyapi.weixin.qq.com}
+      WECOM_CORP_ID: ${WECOM_CORP_ID:-}
+      WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
+      WECOM_CORP_SECRET: ${WECOM_CORP_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  wecom-mock:
+    profiles: ["test"]
+    image: python:3.12-alpine
+    command: ["python", "/app/wecom_mock.py"]
+    volumes:
+      - ./tests/integration/wecom_mock.py:/app/wecom_mock.py:ro
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "workchat_bot/gen/go/agent/v1;agentv1";
+
+import "google/protobuf/timestamp.proto";
+
+// AgentService 仅供内部服务调用，禁止直接暴露给最终用户。
+service AgentService {
+  // 执行带权限过滤的 RAG 流程，并按 request_id 幂等保存回答。
+  rpc AnswerQuestion(AnswerQuestionRequest) returns (AnswerQuestionResponse);
+
+  // 向 Gateway 返回浅层健康状态。
+  rpc GetHealth(HealthRequest) returns (HealthResponse);
+}
+
+message AnswerQuestionRequest {
+  // Gateway 生成的稳定幂等键。
+  string request_id = 1;
+
+  // 企业和用户均使用内部稳定 ID，不能使用客户端自报的身份字段。
+  string tenant_id = 2;
+  string user_id = 3;
+
+  // conversation_id 为空时创建新会话。
+  string conversation_id = 4;
+  string question = 5;
+
+  // 同时存在链路 metadata 时，trace_id 必须与其一致。
+  string trace_id = 6;
+
+  // 可选查询范围；Agent 必须与用户实时授权范围取交集。
+  repeated string knowledge_base_ids = 7;
+
+  // 稳定渠道代码，例如 WECOM、WEB。
+  string channel = 8;
+}
+
+message AnswerQuestionResponse {
+  string message_id = 1;
+  string answer = 2;
+  repeated Citation citations = 3;
+  bool refused = 4;
+
+  // 稳定拒答码；refused=false 时必须为空。
+  string refusal_reason = 5;
+
+  string conversation_id = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message Citation {
+  // 从 1 开始的引用编号，与答案中的标记一致。
+  int32 index = 1;
+  string document_id = 2;
+  int32 document_version = 3;
+  string title = 4;
+  string locator_type = 5;
+  string locator_value = 6;
+  google.protobuf.Timestamp effective_at = 7;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  // UP、DEGRADED 或 DOWN。
+  string status = 1;
+  string version = 2;
+}

@@ -1,0 +1,12 @@
+.git
+.bin
+.env
+.pytest_cache
+.ruff_cache
+.venv
+**/__pycache__
+**/*.pyc
+agent/.venv
+coverage.out
+dist
+tmp

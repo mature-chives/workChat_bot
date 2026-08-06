@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.idea/
+.vscode/
+.bin/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.py[cod]
+coverage.out
+dist/
+tmp/
+agent/.venv/
