@@ -17,6 +17,7 @@
 - 回答、模型、检索配置和引用来源持久化
 - PDF、DOCX、XLSX、Markdown、TXT、CSV 文档上传与切片
 - 原始文档存储到 MinIO
+- 内部知识管理后台：运行概览、知识库筛选、文档上传、版本历史和停用/恢复
 - 企业微信 access token 缓存、重复发送保护和可靠投递记录
 - Docker Compose 本地运行环境
 
@@ -36,7 +37,7 @@ flowchart LR
     DONE --> OUT[Go Outbound Worker]
     OUT --> WX
 
-    ADMIN[内部文档上传] --> HTTP[Agent HTTP]
+    ADMIN[知识管理后台] --> HTTP[Agent HTTP]
     HTTP --> MINIO[(MinIO)]
     HTTP --> DB
     HTTP --> EMB
@@ -96,7 +97,24 @@ curl http://127.0.0.1:8081/internal/v1/health/ready
 docker compose ps
 ```
 
-### 3. 上传示例知识文档
+### 3. 使用知识管理后台
+
+浏览器访问：
+
+```text
+http://127.0.0.1:8081/admin
+```
+
+本地默认管理员令牌为 `local-dev-token`。验证成功后可查看运行统计和存储健康状态，并完成：
+
+- 按知识库、状态或关键词检索文档
+- 上传新文档，为已有文档发布新版本
+- 查看文档详情、索引状态和版本历史
+- 软停用或恢复文档的 RAG 检索，不删除 MinIO 原文件
+
+令牌仅保存在当前浏览器的 `sessionStorage`，关闭当前会话后需要重新登录。令牌由 `AGENT_ADMIN_TOKEN` 配置，生产环境必须替换默认值，并通过内网或反向代理访问控制保护后台。
+
+也可以通过命令行上传示例文档：
 
 ```bash
 make upload-example
@@ -178,9 +196,15 @@ make up-wecom
 | `POST` | `/callbacks/wecom` | 接收企业微信加密消息 |
 | `GET` | `/internal/v1/health/live` | Agent HTTP 存活检查 |
 | `GET` | `/internal/v1/health/ready` | Agent PostgreSQL/MinIO 就绪检查 |
+| `GET` | `/admin` | 内部知识管理后台 |
+| `GET` | `/internal/v1/admin/overview` | 后台运行概览 |
+| `GET` | `/internal/v1/admin/knowledge-bases` | 后台知识库列表 |
+| `GET` | `/internal/v1/admin/documents` | 后台文档检索与分页 |
+| `GET` | `/internal/v1/admin/documents/{id}` | 文档详情和版本历史 |
+| `PATCH` | `/internal/v1/admin/documents/{id}/state` | 软停用或恢复文档 |
 | `POST` | `/internal/v1/documents` | 内部知识文档上传 |
 
-文档上传接口使用 `X-Internal-Token`，其值由 `AGENT_ADMIN_TOKEN` 配置。
+`/internal/v1/admin/*` 与文档上传接口均使用 `X-Internal-Token`，其值由 `AGENT_ADMIN_TOKEN` 配置。
 
 ## 本地开发与测试
 
@@ -203,6 +227,7 @@ make test
 - 出站内容长度和 UTF-8 截断
 - Agent 请求校验、拒答、RRF、引用重编号和降级回答
 - 文档解析、切片及无 Embedding 模式导入
+- 管理后台鉴权、查询过滤、文档详情和状态切换接口
 
 ## 项目结构
 
@@ -220,7 +245,7 @@ make test
 │   ├── store/               # PostgreSQL 数据访问
 │   └── wecom/               # 企业微信加解密与 API 客户端
 ├── agent/
-│   ├── src/agent/           # Python Agent、RAG、文档导入
+│   ├── src/agent/           # Python Agent、RAG、文档导入与管理后台
 │   └── tests/
 ├── migrations/              # PostgreSQL 初始化迁移
 ├── proto/                   # gRPC 协议
@@ -233,7 +258,7 @@ make test
 - 企业微信入口当前只处理文本消息；图片、文件消息和 OCR 尚未接入。
 - 支持 `.pdf`、`.docx`、`.xlsx`、`.md`、`.txt`、`.csv`；旧版 `.doc`、`.xls` 需先转换。
 - 企业微信通讯录同步尚未实现，首次提问用户会自动建立本地映射。
-- 当前没有管理后台 UI，文档通过内部 HTTP 接口上传。
+- 当前后台使用租户级单一管理员令牌，尚未提供多管理员账号、细粒度后台 RBAC 和审计操作页。
 - Compose 默认密码和 `local-dev-token` 只适合本地开发，生产部署前必须更换。
 
 更详细的接口和架构约定位于 [`docs/`](docs/)。

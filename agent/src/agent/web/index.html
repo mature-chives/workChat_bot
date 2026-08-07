@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#0f2d25">
+    <title>知域 · 企业知识管理</title>
+    <link rel="stylesheet" href="/admin/assets/styles.css">
+    <script defer src="/admin/assets/app.js"></script>
+  </head>
+  <body>
+    <svg class="svg-defs" aria-hidden="true">
+      <symbol id="icon-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+      <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5M9 12h6M9 16h6"/></symbol>
+      <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M5 15v5h14v-5"/></symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M18 9a7 7 0 0 0-12-2l-2 2M6 15a7 7 0 0 0 12 2l2-2"/></symbol>
+      <symbol id="icon-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
+      <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+      <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+      <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10V6z"/><path d="m9 12 2 2 4-5"/></symbol>
+      <symbol id="icon-logout" viewBox="0 0 24 24"><path d="M10 4H5v16h5M14 8l4 4-4 4M8 12h10"/></symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="icon-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></symbol>
+      <symbol id="icon-spark" viewBox="0 0 24 24"><path d="m12 2 1.6 5.4L19 9l-5.4 1.6L12 16l-1.6-5.4L5 9l5.4-1.6zM19 16l.7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7z"/></symbol>
+    </svg>
+
+    <div class="app-shell" id="appShell" aria-hidden="true">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div><strong>知域</strong><small>KNOWLEDGE OPS</small></div>
+        </div>
+
+        <nav class="side-nav" aria-label="主导航">
+          <button class="nav-item active" type="button" data-section="overview">
+            <svg><use href="#icon-grid"></use></svg><span>工作台</span>
+          </button>
+          <button class="nav-item" type="button" data-section="documents">
+            <svg><use href="#icon-file"></use></svg><span>知识文档</span><span class="nav-count" id="navDocumentCount">0</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-note">
+          <div class="sidebar-note-icon"><svg><use href="#icon-shield"></use></svg></div>
+          <strong>权限内检索</strong>
+          <p>文档会按企业、角色和部门 ACL 进入问答链路。</p>
+        </div>
+
+        <div class="sidebar-footer">
+          <div class="operator-avatar">管</div>
+          <div class="operator-copy"><strong>知识管理员</strong><span id="tenantShort">内部工作区</span></div>
+          <button class="icon-button dark" id="logoutButton" type="button" aria-label="退出管理后台"><svg><use href="#icon-logout"></use></svg></button>
+        </div>
+      </aside>
+
+      <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+      <div class="workspace">
+        <header class="topbar">
+          <button class="icon-button mobile-menu" id="mobileMenu" type="button" aria-label="打开菜单"><svg><use href="#icon-menu"></use></svg></button>
+          <div class="breadcrumb"><span>企业知识中台</span><svg><use href="#icon-chevron"></use></svg><strong id="breadcrumbCurrent">工作台</strong></div>
+          <div class="topbar-actions">
+            <div class="service-pill"><span id="globalHealthDot" class="pulse-dot"></span><span id="globalHealthText">检查服务中</span></div>
+            <button class="primary-button compact" type="button" data-action="upload"><svg><use href="#icon-upload"></use></svg>上传文档</button>
+          </div>
+        </header>
+
+        <main>
+          <section class="page-section active" id="section-overview" data-page="overview">
+            <div class="hero-row">
+              <div>
+                <p class="eyebrow">KNOWLEDGE CONTROL CENTER</p>
+                <h1>让企业知识，随问随达。</h1>
+                <p class="hero-copy">集中管理资料、索引状态和知识库范围。所有内容进入问答前都会经过权限过滤。</p>
+              </div>
+              <div class="hero-art" aria-hidden="true">
+                <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+                <div class="art-core"><svg><use href="#icon-spark"></use></svg></div>
+                <span class="art-node node-a"></span><span class="art-node node-b"></span><span class="art-node node-c"></span>
+              </div>
+            </div>
+
+            <div class="metric-grid" id="metricGrid">
+              <article class="metric-card"><span class="metric-label">知识文档</span><strong data-metric="documents">—</strong><small>已纳入管理</small><div class="metric-accent teal"></div></article>
+              <article class="metric-card"><span class="metric-label">有效知识块</span><strong data-metric="chunks">—</strong><small>可参与检索</small><div class="metric-accent blue"></div></article>
+              <article class="metric-card"><span class="metric-label">向量覆盖</span><strong data-metric="vectors">—</strong><small>Embedding 完成率</small><div class="metric-accent amber"></div></article>
+              <article class="metric-card"><span class="metric-label">24 小时问答</span><strong data-metric="questions">—</strong><small>Agent 请求量</small><div class="metric-accent violet"></div></article>
+            </div>
+
+            <div class="overview-grid">
+              <article class="panel knowledge-panel">
+                <div class="panel-heading">
+                  <div><p class="panel-kicker">KNOWLEDGE BASES</p><h2>知识库概览</h2></div>
+                  <button class="text-button" type="button" data-section-jump="documents">查看全部文档 <svg><use href="#icon-chevron"></use></svg></button>
+                </div>
+                <div class="knowledge-list" id="knowledgeBaseList"><div class="skeleton tall"></div><div class="skeleton tall"></div></div>
+              </article>
+
+              <div class="side-stack">
+                <article class="panel health-panel">
+                  <div class="panel-heading"><div><p class="panel-kicker">SYSTEM STATUS</p><h2>服务状态</h2></div><button class="icon-button" id="refreshHealth" type="button" aria-label="刷新服务状态"><svg><use href="#icon-refresh"></use></svg></button></div>
+                  <div class="health-list" id="healthList">
+                    <div class="health-row"><span class="health-icon"><svg><use href="#icon-database"></use></svg></span><div><strong>PostgreSQL</strong><small>权限与知识索引</small></div><span class="status-dot pending"></span></div>
+                    <div class="health-row"><span class="health-icon"><svg><use href="#icon-layers"></use></svg></span><div><strong>MinIO</strong><small>原始文档存储</small></div><span class="status-dot pending"></span></div>
+                  </div>
+                </article>
+
+                <article class="panel storage-panel">
+                  <p class="panel-kicker">STORAGE</p><h2>文档存储</h2>
+                  <div class="storage-value" id="storageValue">—</div>
+                  <p>统计所有历史版本的原始文件体积。</p>
+                  <div class="storage-track"><span id="storageTrack"></span></div>
+                </article>
+              </div>
+            </div>
+          </section>
+
+          <section class="page-section" id="section-documents" data-page="documents">
+            <div class="page-title-row">
+              <div><p class="eyebrow">DOCUMENT LIBRARY</p><h1>知识文档</h1><p>检索、更新和控制进入 RAG 的企业资料。</p></div>
+              <button class="primary-button" type="button" data-action="upload"><svg><use href="#icon-plus"></use></svg>上传新文档</button>
+            </div>
+
+            <div class="document-toolbar panel">
+              <label class="search-field"><svg><use href="#icon-search"></use></svg><input id="documentSearch" type="search" placeholder="搜索标题、来源代码或文件名" autocomplete="off"></label>
+              <label class="select-field"><span>知识库</span><select id="knowledgeFilter"><option value="">全部知识库</option></select></label>
+              <label class="select-field"><span>状态</span><select id="statusFilter"><option value="">全部状态</option><option value="READY">可用</option><option value="DISABLED">已停用</option><option value="FAILED">失败</option><option value="INDEXING">索引中</option></select></label>
+              <button class="icon-button refresh-documents" id="refreshDocuments" type="button" aria-label="刷新文档"><svg><use href="#icon-refresh"></use></svg></button>
+            </div>
+
+            <div class="document-panel panel">
+              <div class="table-meta"><span id="documentSummary">正在读取文档…</span><span id="filterHint"></span></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>文档</th><th>知识库</th><th>版本 / 索引</th><th>知识块</th><th>状态</th><th>更新时间</th><th><span class="sr-only">操作</span></th></tr></thead>
+                  <tbody id="documentTableBody"><tr><td colspan="7"><div class="table-loading"><span></span><span></span><span></span></div></td></tr></tbody>
+                </table>
+                <div class="empty-state" id="documentEmpty" hidden><div class="empty-icon"><svg><use href="#icon-file"></use></svg></div><h3>还没有匹配的文档</h3><p>调整筛选条件，或上传一份新的企业资料。</p><button class="secondary-button" type="button" data-action="upload">上传文档</button></div>
+              </div>
+              <div class="pagination"><button class="secondary-button small" id="previousPage" type="button">上一页</button><span id="pageIndicator">第 1 页</span><button class="secondary-button small" id="nextPage" type="button">下一页</button></div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <dialog class="auth-dialog" id="authDialog">
+      <div class="auth-visual"><div class="auth-pattern"></div><div class="auth-logo"><div class="brand-mark large"><span></span><span></span><span></span></div><strong>知域</strong></div><div class="auth-quote">“让正确的人，在正确的时间，得到有依据的答案。”</div></div>
+      <form class="auth-form" id="authForm">
+        <p class="eyebrow">SECURE CONSOLE</p><h1>进入知识管理后台</h1><p>使用内部管理员令牌验证身份。令牌只保存在当前浏览器会话中。</p>
+        <label><span>管理员令牌</span><input id="tokenInput" type="password" placeholder="输入 AGENT_ADMIN_TOKEN" autocomplete="current-password" required></label>
+        <p class="form-error" id="authError" role="alert"></p>
+        <button class="primary-button full" type="submit"><span>验证并进入</span><svg><use href="#icon-chevron"></use></svg></button>
+        <small class="auth-hint">本地默认值为 <code>local-dev-token</code>，生产环境请务必更换。</small>
+      </form>
+    </dialog>
+
+    <dialog class="modal upload-modal" id="uploadDialog">
+      <div class="modal-shell">
+        <div class="modal-heading"><div><p class="panel-kicker">DOCUMENT INGESTION</p><h2 id="uploadDialogTitle">上传知识文档</h2><p id="uploadDialogCopy">文件会存入 MinIO，并自动解析、切片和建立索引。</p></div><button class="icon-button" type="button" data-close-dialog="uploadDialog" aria-label="关闭"><svg><use href="#icon-close"></use></svg></button></div>
+        <form id="uploadForm">
+          <input id="uploadDocumentId" type="hidden">
+          <label class="drop-zone" id="dropZone">
+            <input id="uploadFile" type="file" accept=".pdf,.docx,.xlsx,.md,.markdown,.txt,.csv" required>
+            <span class="drop-icon"><svg><use href="#icon-upload"></use></svg></span>
+            <strong id="dropTitle">拖放文件到这里，或点击选择</strong>
+            <small id="dropMeta">PDF、DOCX、XLSX、Markdown、TXT、CSV · 最大 20 MB</small>
+          </label>
+          <div class="form-grid">
+            <label><span>文档标题</span><input id="uploadTitle" type="text" maxlength="300" placeholder="默认使用文件名"></label>
+            <label><span>知识库 <b>*</b></span><select id="uploadKnowledgeBase" required><option value="">选择知识库</option></select></label>
+            <label class="form-span"><span>来源代码</span><input id="uploadSourceCode" type="text" maxlength="200" placeholder="例如 policy-expense-v1（可选）"></label>
+          </div>
+          <div class="upload-progress" id="uploadProgress" hidden><span></span></div>
+          <p class="form-error" id="uploadError" role="alert"></p>
+          <div class="modal-actions"><button class="secondary-button" type="button" data-close-dialog="uploadDialog">取消</button><button class="primary-button" id="uploadSubmit" type="submit"><svg><use href="#icon-upload"></use></svg><span>上传并建立索引</span></button></div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog class="detail-dialog" id="detailDialog">
+      <div class="detail-shell">
+        <div class="detail-top"><button class="icon-button" type="button" data-close-dialog="detailDialog" aria-label="关闭详情"><svg><use href="#icon-close"></use></svg></button></div>
+        <div id="detailContent"><div class="detail-loading"><span></span><p>读取文档详情…</p></div></div>
+      </div>
+    </dialog>
+
+    <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+  </body>
+</html>

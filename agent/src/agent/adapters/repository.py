@@ -163,6 +163,280 @@ class PostgresRepository:
     async def ping(self) -> None:
         await self._pool.execute("SELECT 1")
 
+    async def get_admin_overview(self, tenant_id: str) -> dict[str, object]:
+        row = await self._pool.fetchrow(
+            """
+            SELECT
+                t.name AS tenant_name,
+                (SELECT count(*) FROM knowledge_bases kb
+                 WHERE kb.tenant_id = t.id AND kb.status = 'ACTIVE') AS knowledge_base_count,
+                (SELECT count(*) FROM documents d
+                 WHERE d.tenant_id = t.id AND d.status <> 'DELETED') AS document_count,
+                (SELECT count(*) FROM documents d
+                 WHERE d.tenant_id = t.id AND d.status = 'READY') AS ready_document_count,
+                (SELECT count(*) FROM documents d
+                 WHERE d.tenant_id = t.id AND d.status = 'DISABLED') AS disabled_document_count,
+                (SELECT count(*) FROM chunks c
+                 WHERE c.tenant_id = t.id AND c.is_active) AS active_chunk_count,
+                (SELECT count(*) FROM chunks c
+                 WHERE c.tenant_id = t.id AND c.is_active
+                   AND c.embedding IS NOT NULL) AS vectorized_chunk_count,
+                (SELECT COALESCE(sum(dv.file_size), 0) FROM document_versions dv
+                 WHERE dv.tenant_id = t.id) AS storage_bytes,
+                (SELECT count(*) FROM query_runs qr
+                 WHERE qr.tenant_id = t.id
+                   AND qr.created_at >= now() - interval '24 hours') AS questions_24h
+            FROM tenants t
+            WHERE t.id = $1::uuid
+            """,
+            tenant_id,
+        )
+        if row is None:
+            raise ResourceNotFound("tenant not found")
+        return {key: row[key] for key in row.keys()}
+
+    async def list_knowledge_bases(self, tenant_id: str) -> list[dict[str, object]]:
+        rows = await self._pool.fetch(
+            """
+            SELECT
+                kb.id::text,
+                kb.code,
+                kb.name,
+                kb.description,
+                kb.status,
+                kb.active_index_version,
+                kb.created_at,
+                count(DISTINCT d.id) FILTER (WHERE d.status <> 'DELETED') AS document_count,
+                count(DISTINCT d.id) FILTER (WHERE d.status = 'READY') AS ready_document_count,
+                count(DISTINCT c.id) FILTER (WHERE c.is_active) AS active_chunk_count
+            FROM knowledge_bases kb
+            LEFT JOIN documents d
+              ON d.tenant_id = kb.tenant_id
+             AND d.knowledge_base_id = kb.id
+            LEFT JOIN chunks c
+              ON c.tenant_id = kb.tenant_id
+             AND c.knowledge_base_id = kb.id
+             AND c.document_id = d.id
+            WHERE kb.tenant_id = $1::uuid
+            GROUP BY kb.id
+            ORDER BY kb.status, kb.name, kb.id
+            """,
+            tenant_id,
+        )
+        return [{key: row[key] for key in row.keys()} for row in rows]
+
+    async def list_documents(
+        self,
+        tenant_id: str,
+        knowledge_base_id: str | None,
+        document_status: str | None,
+        search: str | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, object]:
+        normalized_search = search.strip() if search and search.strip() else None
+        filters = """
+            d.tenant_id = $1::uuid
+            AND d.status <> 'DELETED'
+            AND ($2::uuid IS NULL OR d.knowledge_base_id = $2::uuid)
+            AND ($3::text IS NULL OR d.status = $3)
+            AND (
+                $4::text IS NULL
+                OR d.title ILIKE '%' || $4 || '%'
+                OR COALESCE(d.source_code, '') ILIKE '%' || $4 || '%'
+                OR COALESCE(dv.file_name, '') ILIKE '%' || $4 || '%'
+            )
+        """
+        total = await self._pool.fetchval(
+            f"""
+            SELECT count(*)
+            FROM documents d
+            LEFT JOIN document_versions dv
+              ON dv.id = d.current_version_id AND dv.tenant_id = d.tenant_id
+            WHERE {filters}
+            """,
+            tenant_id,
+            knowledge_base_id,
+            document_status,
+            normalized_search,
+        )
+        rows = await self._pool.fetch(
+            f"""
+            SELECT
+                d.id::text,
+                d.title,
+                d.source_code,
+                d.classification_code,
+                d.acl_mode,
+                d.status,
+                d.created_at,
+                d.updated_at,
+                kb.id::text AS knowledge_base_id,
+                kb.name AS knowledge_base_name,
+                dv.version_number,
+                dv.file_name,
+                dv.file_size,
+                dv.index_status,
+                dv.index_version,
+                dv.indexed_at,
+                (SELECT count(*) FROM chunks c
+                 WHERE c.tenant_id = d.tenant_id
+                   AND c.document_version_id = d.current_version_id) AS chunk_count,
+                (SELECT count(*) FROM chunks c
+                 WHERE c.tenant_id = d.tenant_id
+                   AND c.document_version_id = d.current_version_id
+                   AND c.embedding IS NOT NULL) AS vectorized_chunk_count
+            FROM documents d
+            JOIN knowledge_bases kb
+              ON kb.id = d.knowledge_base_id AND kb.tenant_id = d.tenant_id
+            LEFT JOIN document_versions dv
+              ON dv.id = d.current_version_id AND dv.tenant_id = d.tenant_id
+            WHERE {filters}
+            ORDER BY d.updated_at DESC, d.id
+            LIMIT $5 OFFSET $6
+            """,
+            tenant_id,
+            knowledge_base_id,
+            document_status,
+            normalized_search,
+            limit,
+            offset,
+        )
+        return {
+            "items": [{key: row[key] for key in row.keys()} for row in rows],
+            "total": int(total or 0),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    async def get_document(self, tenant_id: str, document_id: str) -> dict[str, object]:
+        document = await self._pool.fetchrow(
+            """
+            SELECT
+                d.id::text,
+                d.title,
+                d.source_code,
+                d.classification_code,
+                d.acl_mode,
+                d.status,
+                d.created_at,
+                d.updated_at,
+                d.current_version_id::text,
+                kb.id::text AS knowledge_base_id,
+                kb.name AS knowledge_base_name,
+                kb.active_index_version,
+                (SELECT count(*) FROM citations ci
+                 WHERE ci.tenant_id = d.tenant_id
+                   AND ci.document_id = d.id) AS citation_count
+            FROM documents d
+            JOIN knowledge_bases kb
+              ON kb.id = d.knowledge_base_id AND kb.tenant_id = d.tenant_id
+            WHERE d.tenant_id = $1::uuid AND d.id = $2::uuid
+              AND d.status <> 'DELETED'
+            """,
+            tenant_id,
+            document_id,
+        )
+        if document is None:
+            raise ResourceNotFound("document not found")
+        versions = await self._pool.fetch(
+            """
+            SELECT
+                dv.id::text,
+                dv.version_number,
+                dv.file_name,
+                dv.file_size,
+                dv.sha256,
+                dv.index_status,
+                dv.index_version,
+                dv.is_current,
+                dv.created_at,
+                dv.indexed_at,
+                (SELECT count(*) FROM chunks c
+                 WHERE c.tenant_id = dv.tenant_id
+                   AND c.document_version_id = dv.id) AS chunk_count,
+                (SELECT count(*) FROM chunks c
+                 WHERE c.tenant_id = dv.tenant_id
+                   AND c.document_version_id = dv.id
+                   AND c.embedding IS NOT NULL) AS vectorized_chunk_count
+            FROM document_versions dv
+            WHERE dv.tenant_id = $1::uuid AND dv.document_id = $2::uuid
+            ORDER BY dv.version_number DESC
+            """,
+            tenant_id,
+            document_id,
+        )
+        return {
+            **{key: document[key] for key in document.keys()},
+            "versions": [{key: row[key] for key in row.keys()} for row in versions],
+        }
+
+    async def set_document_active(
+        self,
+        tenant_id: str,
+        document_id: str,
+        active: bool,
+    ) -> str:
+        async with self._pool.acquire() as connection, connection.transaction():
+            document = await connection.fetchrow(
+                """
+                SELECT
+                    d.status,
+                    d.current_version_id::text,
+                    dv.index_version,
+                    kb.active_index_version
+                FROM documents d
+                JOIN knowledge_bases kb
+                  ON kb.id = d.knowledge_base_id AND kb.tenant_id = d.tenant_id
+                LEFT JOIN document_versions dv
+                  ON dv.id = d.current_version_id AND dv.tenant_id = d.tenant_id
+                WHERE d.tenant_id = $1::uuid AND d.id = $2::uuid
+                FOR UPDATE OF d
+                """,
+                tenant_id,
+                document_id,
+            )
+            if document is None or document["status"] == "DELETED":
+                raise ResourceNotFound("document not found")
+            if active:
+                if document["current_version_id"] is None:
+                    raise InvalidRequest("document has no indexed version")
+                if document["index_version"] != document["active_index_version"]:
+                    raise InvalidRequest("document must be reindexed before activation")
+                await connection.execute(
+                    """
+                    UPDATE chunks
+                    SET is_active = (document_version_id = $3::uuid)
+                    WHERE tenant_id = $1::uuid AND document_id = $2::uuid
+                    """,
+                    tenant_id,
+                    document_id,
+                    document["current_version_id"],
+                )
+                next_status = "READY"
+            else:
+                await connection.execute(
+                    """
+                    UPDATE chunks
+                    SET is_active = false
+                    WHERE tenant_id = $1::uuid AND document_id = $2::uuid
+                    """,
+                    tenant_id,
+                    document_id,
+                )
+                next_status = "DISABLED"
+            await connection.execute(
+                """
+                UPDATE documents
+                SET status = $3, updated_at = now()
+                WHERE tenant_id = $1::uuid AND id = $2::uuid
+                """,
+                tenant_id,
+                document_id,
+                next_status,
+            )
+            return next_status
+
     async def claim_query(
         self,
         *,

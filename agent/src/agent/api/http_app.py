@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from agent import __version__
 from agent.adapters.models import OpenAIEmbeddingClient
 from agent.adapters.object_store import MinioObjectStore
 from agent.adapters.repository import PostgresRepository
+from agent.api.admin_api import create_admin_dependency, create_admin_router
 from agent.application.ingestion import DocumentIngestionService
 from agent.application.models import DependencyUnavailable, InvalidRequest, ResourceNotFound
 from agent.settings import Settings, get_settings
@@ -20,6 +21,8 @@ from agent.settings import Settings, get_settings
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     actual_settings = settings or get_settings()
+    require_admin = create_admin_dependency(actual_settings)
+    web_root = Path(__file__).resolve().parents[1] / "web"
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -57,6 +60,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None,
         lifespan=lifespan,
     )
+    app.mount("/admin/assets", StaticFiles(directory=web_root), name="admin-assets")
+    app.include_router(create_admin_router(actual_settings, require_admin))
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/admin", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    @app.get("/admin", include_in_schema=False)
+    @app.get("/admin/", include_in_schema=False)
+    async def admin_console() -> FileResponse:
+        return FileResponse(
+            web_root / "index.html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/internal/v1/health/live")
     async def live() -> dict[str, str]:
@@ -85,7 +102,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
-    @app.post("/internal/v1/documents", status_code=status.HTTP_201_CREATED)
+    @app.post(
+        "/internal/v1/documents",
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(require_admin)],
+    )
     async def upload_document(
         request: Request,
         file: Annotated[UploadFile, File()],
@@ -93,14 +114,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         document_id: Annotated[str | None, Form()] = None,
         title: Annotated[str | None, Form()] = None,
         source_code: Annotated[str | None, Form()] = None,
-        internal_token: Annotated[str | None, Header(alias="X-Internal-Token")] = None,
     ) -> dict[str, object]:
-        if actual_settings.admin_token is None:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "document upload is disabled")
-        if internal_token is None or not secrets.compare_digest(
-            internal_token, actual_settings.admin_token
-        ):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid internal token")
         data = await file.read(actual_settings.max_upload_bytes + 1)
         actual_title = title or Path(file.filename or "document").stem
         try:
