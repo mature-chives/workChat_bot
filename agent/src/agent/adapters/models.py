@@ -13,20 +13,33 @@ class OpenAIEmbeddingClient:
         api_key: str,
         model: str,
         timeout_seconds: float,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/") if base_url else None
         self._model = model
         self._client = httpx.AsyncClient(
             timeout=timeout_seconds,
             headers={"Authorization": f"Bearer {api_key}"},
+            transport=transport,
         )
 
     @property
     def enabled(self) -> bool:
         return self._base_url is not None
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def probe(self) -> int:
+        if self._base_url is None:
+            raise DependencyUnavailable("embedding service is not configured")
+        vectors = await self.embed_documents(["embedding connectivity check"])
+        return len(vectors[0])
 
     async def embed_query(self, text: str) -> list[float] | None:
         if self._base_url is None:
@@ -64,12 +77,15 @@ class OpenAILLMClient:
         api_key: str,
         model: str,
         timeout_seconds: float,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/") if base_url else None
         self._model = model
         self._client = httpx.AsyncClient(
             timeout=timeout_seconds,
             headers={"Authorization": f"Bearer {api_key}"},
+            transport=transport,
         )
 
     @property
@@ -82,6 +98,19 @@ class OpenAILLMClient:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def probe(self) -> None:
+        if self._base_url is None:
+            raise DependencyUnavailable("LLM service is not configured")
+        try:
+            response = await self._client.get(f"{self._base_url}/models")
+            response.raise_for_status()
+            rows = response.json()["data"]
+            model_ids = [str(row["id"]) for row in rows]
+            if not any(_model_matches(self._model, model_id) for model_id in model_ids):
+                raise ValueError("configured LLM model was not found")
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise DependencyUnavailable("LLM service unavailable or model not found") from exc
 
     async def generate(
         self,
@@ -151,3 +180,9 @@ def _parse_json_object(content: object) -> dict[str, object]:
     if not isinstance(parsed, dict):
         raise TypeError("model content must be a JSON object")
     return parsed
+
+
+def _model_matches(configured: str, available: str) -> bool:
+    configured_name = configured.casefold()
+    available_name = available.casefold()
+    return available_name == configured_name or available_name.split(":", 1)[0] == configured_name

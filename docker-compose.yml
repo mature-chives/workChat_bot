@@ -77,6 +77,9 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       MINIO_BUCKET: workchat-documents
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-local}
+      LLM_MODEL: ${LLM_MODEL:-Qwen3.5-4B}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:11434/v1}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-local}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}

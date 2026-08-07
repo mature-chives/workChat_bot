@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent import __version__
-from agent.adapters.models import OpenAIEmbeddingClient
+from agent.adapters.models import OpenAIEmbeddingClient, OpenAILLMClient
 from agent.adapters.object_store import MinioObjectStore
 from agent.adapters.repository import PostgresRepository
 from agent.api.admin_api import create_admin_dependency, create_admin_router
 from agent.application.ingestion import DocumentIngestionService
 from agent.application.models import DependencyUnavailable, InvalidRequest, ResourceNotFound
+from agent.application.reindex import DocumentReindexWorker
 from agent.settings import Settings, get_settings
 
 
@@ -41,14 +43,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             actual_settings.embedding_model,
             actual_settings.embedding_timeout_seconds,
         )
+        llm = OpenAILLMClient(
+            actual_settings.llm_base_url,
+            actual_settings.llm_api_key,
+            actual_settings.llm_model,
+            actual_settings.llm_timeout_seconds,
+        )
         app.state.repository = repository
         app.state.object_store = object_store
+        app.state.embedding = embedding
+        app.state.llm = llm
         app.state.ingestion = DocumentIngestionService(
             repository, object_store, embedding, actual_settings
+        )
+        reindex_worker = DocumentReindexWorker(
+            repository,
+            embedding,
+            embedding_dimension=actual_settings.embedding_dimension,
+            worker_id=f"agent-http-{uuid4()}",
+        )
+        reindex_task = asyncio.create_task(
+            reindex_worker.run_forever(),
+            name="document-reindex-worker",
         )
         try:
             yield
         finally:
+            reindex_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reindex_task
+            await llm.close()
             await embedding.close()
             await repository.close()
 

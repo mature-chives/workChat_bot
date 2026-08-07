@@ -18,6 +18,7 @@
 - PDF、DOCX、XLSX、Markdown、TXT、CSV 文档上传与切片
 - 原始文档存储到 MinIO
 - 内部知识管理后台：运行概览、知识库筛选、文档上传、版本历史和停用/恢复
+- 本地 LLM、Embedding 在线检测及可恢复的后台向量重建任务
 - 企业微信 access token 缓存、重复发送保护和可靠投递记录
 - Docker Compose 本地运行环境
 
@@ -105,14 +106,15 @@ docker compose ps
 http://127.0.0.1:8081/admin
 ```
 
-本地默认管理员令牌为 `local-dev-token`。验证成功后可查看运行统计和存储健康状态，并完成：
+管理员令牌读取 `.env` 中的 `AGENT_ADMIN_TOKEN`。验证成功后可查看运行统计、模型连接和存储健康状态，并完成：
 
 - 按知识库、状态或关键词检索文档
 - 上传新文档，为已有文档发布新版本
 - 查看文档详情、索引状态和版本历史
 - 软停用或恢复文档的 RAG 检索，不删除 MinIO 原文件
+- 为单个文档重建向量，或一键补齐全部缺失向量
 
-令牌仅保存在当前浏览器的 `sessionStorage`，关闭当前会话后需要重新登录。令牌由 `AGENT_ADMIN_TOKEN` 配置，生产环境必须替换默认值，并通过内网或反向代理访问控制保护后台。
+令牌仅保存在当前浏览器的 `sessionStorage`，关闭当前会话后需要重新登录。生产环境必须替换模板值，并通过内网或反向代理访问控制保护后台。
 
 也可以通过命令行上传示例文档：
 
@@ -160,6 +162,14 @@ EMBEDDING_MODEL=bge-m3
 
 Embedding 输出维度默认为 `1024`，应与数据库中的 `vector(1024)` 保持一致。
 
+后台“模型与索引”区域会实际调用 Embedding 接口并检查输出维度，同时通过 OpenAI-compatible `/models` 接口确认 LLM 是否存在。模型可用后，可以：
+
+- 在工作台或文档页点击“补齐向量”，仅处理当前版本中缺失向量的文档。
+- 在单个文档的列表或详情中点击“重建”，强制重新生成该文档当前版本的全部向量。
+- 查看排队、处理中、等待重试、成功和失败状态。
+
+重建任务持久化在 PostgreSQL 中，Agent HTTP 重启后可以重新领取。临时模型故障会自动重试 3 次；重建只原子更新当前知识块的向量，不会复制 MinIO 文件或增加文档版本。
+
 ## 接入企业微信
 
 在 `.env` 中填写：
@@ -199,9 +209,13 @@ make up-wecom
 | `GET` | `/admin` | 内部知识管理后台 |
 | `GET` | `/internal/v1/admin/overview` | 后台运行概览 |
 | `GET` | `/internal/v1/admin/knowledge-bases` | 后台知识库列表 |
+| `GET` | `/internal/v1/admin/models/status` | LLM 与 Embedding 实际连接状态 |
 | `GET` | `/internal/v1/admin/documents` | 后台文档检索与分页 |
 | `GET` | `/internal/v1/admin/documents/{id}` | 文档详情和版本历史 |
 | `PATCH` | `/internal/v1/admin/documents/{id}/state` | 软停用或恢复文档 |
+| `POST` | `/internal/v1/admin/documents/{id}/reindex` | 重建单个文档向量 |
+| `POST` | `/internal/v1/admin/reindex` | 批量创建向量补建任务 |
+| `GET` | `/internal/v1/admin/reindex/jobs` | 查询向量重建任务进度 |
 | `POST` | `/internal/v1/documents` | 内部知识文档上传 |
 
 `/internal/v1/admin/*` 与文档上传接口均使用 `X-Internal-Token`，其值由 `AGENT_ADMIN_TOKEN` 配置。
@@ -227,7 +241,7 @@ make test
 - 出站内容长度和 UTF-8 截断
 - Agent 请求校验、拒答、RRF、引用重编号和降级回答
 - 文档解析、切片及无 Embedding 模式导入
-- 管理后台鉴权、查询过滤、文档详情和状态切换接口
+- 管理后台鉴权、模型探测、查询过滤、状态切换和可恢复向量重建任务
 
 ## 项目结构
 
@@ -259,6 +273,6 @@ make test
 - 支持 `.pdf`、`.docx`、`.xlsx`、`.md`、`.txt`、`.csv`；旧版 `.doc`、`.xls` 需先转换。
 - 企业微信通讯录同步尚未实现，首次提问用户会自动建立本地映射。
 - 当前后台使用租户级单一管理员令牌，尚未提供多管理员账号、细粒度后台 RBAC 和审计操作页。
-- Compose 默认密码和 `local-dev-token` 只适合本地开发，生产部署前必须更换。
+- Compose 模板密码和管理员令牌只适合本地开发，生产部署前必须更换。
 
 更详细的接口和架构约定位于 [`docs/`](docs/)。

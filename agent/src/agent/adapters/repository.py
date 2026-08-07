@@ -20,6 +20,7 @@ from agent.application.models import (
     RequestInProgress,
     ResourceNotFound,
 )
+from agent.application.reindex import ReindexChunk, ReindexJob, ReindexSource
 
 _ACL_MATCH = """
 (
@@ -436,6 +437,477 @@ class PostgresRepository:
                 next_status,
             )
             return next_status
+
+    async def enqueue_document_reindex(
+        self,
+        tenant_id: str,
+        document_id: str,
+    ) -> dict[str, object]:
+        async with self._pool.acquire() as connection, connection.transaction():
+            document = await connection.fetchrow(
+                """
+                SELECT d.current_version_id::text
+                FROM documents d
+                WHERE d.tenant_id = $1::uuid AND d.id = $2::uuid
+                  AND d.status NOT IN ('DELETING', 'DELETED')
+                FOR UPDATE OF d
+                """,
+                tenant_id,
+                document_id,
+            )
+            if document is None:
+                raise ResourceNotFound("document not found")
+            if document["current_version_id"] is None:
+                raise InvalidRequest("document has no current version")
+            chunk_count = await connection.fetchval(
+                """
+                SELECT count(*)
+                FROM chunks
+                WHERE tenant_id = $1::uuid
+                  AND document_id = $2::uuid
+                  AND document_version_id = $3::uuid
+                """,
+                tenant_id,
+                document_id,
+                document["current_version_id"],
+            )
+            if not chunk_count:
+                raise InvalidRequest("document has no chunks to reindex")
+            job, created = await self._enqueue_reindex_job(
+                connection,
+                tenant_id,
+                document_id,
+            )
+            return {
+                "job_id": job["id"],
+                "document_id": document_id,
+                "status": job["status"],
+                "created": created,
+            }
+
+    async def enqueue_reindex_jobs(
+        self,
+        tenant_id: str,
+        knowledge_base_id: str | None,
+        only_missing_vectors: bool,
+    ) -> dict[str, object]:
+        async with self._pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"document-reindex:{tenant_id}",
+            )
+            if knowledge_base_id is not None:
+                knowledge_base_exists = await connection.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM knowledge_bases
+                        WHERE tenant_id = $1::uuid AND id = $2::uuid
+                    )
+                    """,
+                    tenant_id,
+                    knowledge_base_id,
+                )
+                if not knowledge_base_exists:
+                    raise ResourceNotFound("knowledge base not found")
+            documents = await connection.fetch(
+                """
+                SELECT d.id::text
+                FROM documents d
+                WHERE d.tenant_id = $1::uuid
+                  AND d.status NOT IN ('DELETING', 'DELETED')
+                  AND d.current_version_id IS NOT NULL
+                  AND ($2::uuid IS NULL OR d.knowledge_base_id = $2::uuid)
+                  AND EXISTS (
+                      SELECT 1 FROM chunks c
+                      WHERE c.tenant_id = d.tenant_id
+                        AND c.document_id = d.id
+                        AND c.document_version_id = d.current_version_id
+                  )
+                  AND (
+                      NOT $3::boolean
+                      OR EXISTS (
+                          SELECT 1 FROM chunks c
+                          WHERE c.tenant_id = d.tenant_id
+                            AND c.document_id = d.id
+                            AND c.document_version_id = d.current_version_id
+                            AND c.embedding IS NULL
+                      )
+                  )
+                ORDER BY d.updated_at, d.id
+                FOR UPDATE OF d
+                """,
+                tenant_id,
+                knowledge_base_id,
+                only_missing_vectors,
+            )
+            queued_jobs: list[dict[str, object]] = []
+            already_queued = 0
+            for document in documents:
+                job, created = await self._enqueue_reindex_job(
+                    connection,
+                    tenant_id,
+                    document["id"],
+                )
+                if created:
+                    queued_jobs.append(
+                        {
+                            "job_id": job["id"],
+                            "document_id": document["id"],
+                            "status": job["status"],
+                        }
+                    )
+                else:
+                    already_queued += 1
+            return {
+                "eligible_count": len(documents),
+                "queued_count": len(queued_jobs),
+                "already_queued_count": already_queued,
+                "jobs": queued_jobs,
+            }
+
+    async def list_reindex_jobs(
+        self,
+        tenant_id: str,
+        limit: int,
+    ) -> dict[str, object]:
+        rows = await self._pool.fetch(
+            """
+            SELECT
+                j.id::text,
+                j.resource_id::text AS document_id,
+                d.title AS document_title,
+                j.status,
+                j.stage,
+                j.attempt,
+                j.error_code,
+                j.error_message,
+                j.created_at,
+                j.started_at,
+                j.finished_at,
+                j.updated_at
+            FROM jobs j
+            LEFT JOIN documents d
+              ON d.tenant_id = j.tenant_id AND d.id = j.resource_id
+            WHERE j.tenant_id = $1::uuid
+              AND j.job_type = 'REINDEX_DOCUMENT'
+              AND j.resource_type = 'DOCUMENT'
+            ORDER BY j.created_at DESC, j.id
+            LIMIT $2
+            """,
+            tenant_id,
+            limit,
+        )
+        counts = await self._pool.fetchrow(
+            """
+            SELECT
+                count(*) FILTER (WHERE status = 'QUEUED') AS queued_count,
+                count(*) FILTER (WHERE status = 'IN_PROGRESS') AS in_progress_count,
+                count(*) FILTER (WHERE status = 'RETRYING') AS retrying_count,
+                count(*) FILTER (WHERE status = 'SUCCEEDED') AS succeeded_count,
+                count(*) FILTER (WHERE status = 'FAILED') AS failed_count
+            FROM jobs
+            WHERE tenant_id = $1::uuid
+              AND job_type = 'REINDEX_DOCUMENT'
+              AND resource_type = 'DOCUMENT'
+            """,
+            tenant_id,
+        )
+        result_counts = {
+            key: int(counts[key] or 0)
+            for key in (
+                "queued_count",
+                "in_progress_count",
+                "retrying_count",
+                "succeeded_count",
+                "failed_count",
+            )
+        }
+        return {
+            "items": [{key: row[key] for key in row.keys()} for row in rows],
+            **result_counts,
+            "active_count": (
+                result_counts["queued_count"]
+                + result_counts["in_progress_count"]
+                + result_counts["retrying_count"]
+            ),
+        }
+
+    async def claim_reindex_job(
+        self,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> ReindexJob | None:
+        row = await self._pool.fetchrow(
+            """
+            WITH candidate AS (
+                SELECT id
+                FROM jobs
+                WHERE job_type = 'REINDEX_DOCUMENT'
+                  AND resource_type = 'DOCUMENT'
+                  AND (
+                      (
+                          status IN ('QUEUED', 'RETRYING')
+                          AND (leased_until IS NULL OR leased_until <= now())
+                      )
+                      OR (status = 'IN_PROGRESS' AND leased_until <= now())
+                  )
+                ORDER BY created_at, id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE jobs j
+            SET status = 'IN_PROGRESS',
+                stage = 'READING_SOURCE',
+                attempt = j.attempt + 1,
+                worker_id = $1,
+                leased_until = now() + $2::integer * interval '1 second',
+                started_at = COALESCE(j.started_at, now()),
+                updated_at = now()
+            FROM candidate
+            WHERE j.id = candidate.id
+            RETURNING j.id::text, j.tenant_id::text, j.resource_id::text, j.attempt
+            """,
+            worker_id,
+            lease_seconds,
+        )
+        if row is None:
+            return None
+        return ReindexJob(
+            id=row["id"],
+            tenant_id=row["tenant_id"],
+            document_id=row["resource_id"],
+            attempt=int(row["attempt"]),
+        )
+
+    async def get_reindex_source(
+        self,
+        tenant_id: str,
+        document_id: str,
+    ) -> ReindexSource:
+        document = await self._pool.fetchrow(
+            """
+            SELECT
+                d.current_version_id::text AS document_version_id,
+                kb.active_index_version
+            FROM documents d
+            JOIN knowledge_bases kb
+              ON kb.tenant_id = d.tenant_id AND kb.id = d.knowledge_base_id
+            WHERE d.tenant_id = $1::uuid AND d.id = $2::uuid
+              AND d.status NOT IN ('DELETING', 'DELETED')
+            """,
+            tenant_id,
+            document_id,
+        )
+        if document is None:
+            raise ResourceNotFound("document not found")
+        if document["document_version_id"] is None:
+            raise InvalidRequest("document has no current version")
+        rows = await self._pool.fetch(
+            """
+            SELECT id::text, content
+            FROM chunks
+            WHERE tenant_id = $1::uuid
+              AND document_id = $2::uuid
+              AND document_version_id = $3::uuid
+            ORDER BY ordinal, id
+            """,
+            tenant_id,
+            document_id,
+            document["document_version_id"],
+        )
+        if not rows:
+            raise InvalidRequest("document has no chunks to reindex")
+        return ReindexSource(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=document["document_version_id"],
+            index_version=document["active_index_version"],
+            chunks=tuple(ReindexChunk(id=row["id"], content=row["content"]) for row in rows),
+        )
+
+    async def update_reindex_job_stage(self, job_id: str, stage: str) -> None:
+        await self._pool.execute(
+            """
+            UPDATE jobs
+            SET stage = $2,
+                leased_until = now() + interval '2 minutes',
+                updated_at = now()
+            WHERE id = $1::uuid AND status = 'IN_PROGRESS'
+            """,
+            job_id,
+            stage,
+        )
+
+    async def apply_document_embeddings(
+        self,
+        source: ReindexSource,
+        embeddings: Sequence[Sequence[float]],
+    ) -> None:
+        if len(source.chunks) != len(embeddings):
+            raise ValueError("chunk and embedding counts do not match")
+        async with self._pool.acquire() as connection, connection.transaction():
+            current_version_id = await connection.fetchval(
+                """
+                SELECT current_version_id::text
+                FROM documents
+                WHERE tenant_id = $1::uuid AND id = $2::uuid
+                  AND status NOT IN ('DELETING', 'DELETED')
+                FOR UPDATE
+                """,
+                source.tenant_id,
+                source.document_id,
+            )
+            if current_version_id is None:
+                raise ResourceNotFound("document not found")
+            if current_version_id != source.document_version_id:
+                raise InvalidRequest("document version changed during reindex")
+            records = [
+                (
+                    source.tenant_id,
+                    source.document_version_id,
+                    chunk.id,
+                    "[" + ",".join(format(float(value), ".9g") for value in embedding) + "]",
+                    source.index_version,
+                )
+                for chunk, embedding in zip(source.chunks, embeddings, strict=True)
+            ]
+            await connection.executemany(
+                """
+                UPDATE chunks
+                SET embedding = $4::vector,
+                    index_version = $5
+                WHERE tenant_id = $1::uuid
+                  AND document_version_id = $2::uuid
+                  AND id = $3::uuid
+                """,
+                records,
+            )
+            updated_count = await connection.fetchval(
+                """
+                SELECT count(*)
+                FROM chunks
+                WHERE tenant_id = $1::uuid
+                  AND document_version_id = $2::uuid
+                  AND embedding IS NOT NULL
+                  AND index_version = $3
+                """,
+                source.tenant_id,
+                source.document_version_id,
+                source.index_version,
+            )
+            if int(updated_count or 0) != len(source.chunks):
+                raise RuntimeError("not all document chunks were reindexed")
+            await connection.execute(
+                """
+                UPDATE document_versions
+                SET index_status = 'READY',
+                    index_version = $3,
+                    indexed_at = now()
+                WHERE tenant_id = $1::uuid AND id = $2::uuid
+                """,
+                source.tenant_id,
+                source.document_version_id,
+                source.index_version,
+            )
+
+    async def complete_reindex_job(self, job_id: str) -> None:
+        await self._pool.execute(
+            """
+            UPDATE jobs
+            SET status = 'SUCCEEDED',
+                stage = 'COMPLETED',
+                error_code = NULL,
+                error_message = NULL,
+                leased_until = NULL,
+                finished_at = now(),
+                updated_at = now()
+            WHERE id = $1::uuid
+            """,
+            job_id,
+        )
+
+    async def fail_reindex_job(
+        self,
+        job_id: str,
+        error_code: str,
+        error_message: str,
+        retry_after_seconds: int | None,
+    ) -> None:
+        if retry_after_seconds is not None:
+            await self._pool.execute(
+                """
+                UPDATE jobs
+                SET status = 'RETRYING',
+                    stage = 'WAITING_RETRY',
+                    error_code = $2,
+                    error_message = $3,
+                    leased_until = now() + $4::integer * interval '1 second',
+                    worker_id = NULL,
+                    updated_at = now()
+                WHERE id = $1::uuid
+                """,
+                job_id,
+                error_code,
+                error_message,
+                retry_after_seconds,
+            )
+            return
+        await self._pool.execute(
+            """
+            UPDATE jobs
+            SET status = 'FAILED',
+                stage = 'FAILED',
+                error_code = $2,
+                error_message = $3,
+                leased_until = NULL,
+                worker_id = NULL,
+                finished_at = now(),
+                updated_at = now()
+            WHERE id = $1::uuid
+            """,
+            job_id,
+            error_code,
+            error_message,
+        )
+
+    async def _enqueue_reindex_job(
+        self,
+        connection: asyncpg.Connection,
+        tenant_id: str,
+        document_id: str,
+    ) -> tuple[asyncpg.Record, bool]:
+        existing = await connection.fetchrow(
+            """
+            SELECT id::text, status
+            FROM jobs
+            WHERE tenant_id = $1::uuid
+              AND job_type = 'REINDEX_DOCUMENT'
+              AND resource_type = 'DOCUMENT'
+              AND resource_id = $2::uuid
+              AND status IN ('QUEUED', 'IN_PROGRESS', 'RETRYING')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            tenant_id,
+            document_id,
+        )
+        if existing is not None:
+            return existing, False
+        created = await connection.fetchrow(
+            """
+            INSERT INTO jobs (
+                tenant_id, job_type, resource_type, resource_id, status, stage
+            ) VALUES (
+                $1::uuid, 'REINDEX_DOCUMENT', 'DOCUMENT', $2::uuid, 'QUEUED', 'QUEUED'
+            )
+            RETURNING id::text, status
+            """,
+            tenant_id,
+            document_id,
+        )
+        if created is None:
+            raise RuntimeError("reindex job was not created")
+        return created, True
 
     async def claim_query(
         self,

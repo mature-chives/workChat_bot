@@ -27,6 +27,9 @@
     uploading: false,
     searchTimer: null,
     uploadProgressTimer: null,
+    modelStatus: null,
+    reindexActiveCount: 0,
+    reindexPollTimer: null,
   };
 
   const elements = {
@@ -53,11 +56,20 @@
     nextPage: document.querySelector("#nextPage"),
     refreshDocuments: document.querySelector("#refreshDocuments"),
     refreshHealth: document.querySelector("#refreshHealth"),
+    refreshModels: document.querySelector("#refreshModels"),
     healthList: document.querySelector("#healthList"),
     globalHealthDot: document.querySelector("#globalHealthDot"),
     globalHealthText: document.querySelector("#globalHealthText"),
     storageValue: document.querySelector("#storageValue"),
     storageTrack: document.querySelector("#storageTrack"),
+    llmStatusText: document.querySelector("#llmStatusText"),
+    llmStatusDetail: document.querySelector("#llmStatusDetail"),
+    llmStatusDot: document.querySelector("#llmStatusDot"),
+    embeddingStatusText: document.querySelector("#embeddingStatusText"),
+    embeddingStatusDetail: document.querySelector("#embeddingStatusDetail"),
+    embeddingStatusDot: document.querySelector("#embeddingStatusDot"),
+    reindexJobSummary: document.querySelector("#reindexJobSummary"),
+    reindexJobDetail: document.querySelector("#reindexJobDetail"),
     uploadDialog: document.querySelector("#uploadDialog"),
     uploadDialogTitle: document.querySelector("#uploadDialogTitle"),
     uploadDialogCopy: document.querySelector("#uploadDialogCopy"),
@@ -225,6 +237,7 @@
     state.token = "";
     state.session = null;
     storeToken("");
+    stopReindexPolling();
     closeDialog(elements.uploadDialog);
     closeDialog(elements.detailDialog);
     showAuth("登录状态已失效，请重新输入管理员令牌。");
@@ -245,6 +258,8 @@
       loadDocuments(),
       loadHealth(),
     ]);
+    void loadModelStatus();
+    void loadReindexJobs();
   }
 
   function configureSession(session) {
@@ -449,6 +464,7 @@
           <td><div class="row-actions">
             <button class="mini-action" type="button" data-doc-action="detail" data-document-id="${escapeHtml(item.id)}">详情</button>
             <button class="mini-action" type="button" data-doc-action="version" data-document-id="${escapeHtml(item.id)}">新版本</button>
+            <button class="mini-action" type="button" data-doc-action="reindex" data-document-id="${escapeHtml(item.id)}">重建</button>
             ${stateAction}
           </div></td>
         </tr>`;
@@ -466,6 +482,7 @@
     elements.pageIndicator.textContent = `第 ${state.page + 1} / ${pageCount} 页`;
     elements.previousPage.disabled = state.page === 0;
     elements.nextPage.disabled = state.page >= pageCount - 1;
+    updateReindexButtons();
   }
 
   async function openDocumentDetail(documentId) {
@@ -515,6 +532,7 @@
         <p>${escapeHtml(documentDetail.knowledge_base_name)} · 更新于 ${escapeHtml(formatDate(documentDetail.updated_at))}</p>
         <div class="detail-actions">
           <button class="primary-button" type="button" data-detail-action="version" data-document-id="${escapeHtml(documentDetail.id)}"><svg><use href="#icon-upload"></use></svg>上传新版本</button>
+          <button class="secondary-button" type="button" data-detail-action="reindex" data-document-id="${escapeHtml(documentDetail.id)}"><svg><use href="#icon-refresh"></use></svg>重建向量</button>
           ${stateAction}
         </div>
       </div>
@@ -534,6 +552,7 @@
         <div class="version-list">${versionList}</div>
       </section>`;
     state.documents.set(String(documentDetail.id), documentDetail);
+    updateReindexButtons();
   }
 
   async function setDocumentState(documentId, active, trigger) {
@@ -739,6 +758,207 @@
     elements.globalHealthText.textContent = allUp ? "核心服务正常" : "服务状态异常";
   }
 
+  async function loadModelStatus() {
+    try {
+      const modelStatus = await api("/internal/v1/admin/models/status");
+      renderModelStatus(modelStatus);
+    } catch (error) {
+      renderModelStatus({
+        llm: { status: "DOWN", model: "—", detail: "状态读取失败" },
+        embedding: { status: "DOWN", model: "—", detail: "状态读取失败" },
+      });
+      handleRequestError(error, "模型状态读取失败");
+    }
+  }
+
+  function renderModelStatus(modelStatus) {
+    state.modelStatus = modelStatus;
+    renderModelUnit(
+      modelStatus.llm || {},
+      elements.llmStatusText,
+      elements.llmStatusDetail,
+      elements.llmStatusDot,
+      "LLM",
+    );
+    renderModelUnit(
+      modelStatus.embedding || {},
+      elements.embeddingStatusText,
+      elements.embeddingStatusDetail,
+      elements.embeddingStatusDot,
+      "Embedding",
+    );
+    updateReindexButtons();
+  }
+
+  function renderModelUnit(model, textElement, detailElement, dotElement, kind) {
+    const statusLabels = {
+      UP: "连接正常",
+      DOWN: "连接异常",
+      DISABLED: "尚未配置",
+    };
+    textElement.textContent = statusLabels[model.status] || "状态未知";
+    const dimension = kind === "Embedding" && model.dimension
+      ? ` · ${formatNumber(model.dimension)} 维`
+      : "";
+    detailElement.textContent = `${kind} · ${model.model || "—"}${dimension}`;
+    detailElement.title = String(model.detail || "");
+    dotElement.className = model.status === "UP"
+      ? "status-dot"
+      : model.status === "DISABLED"
+        ? "status-dot pending"
+        : "status-dot down";
+  }
+
+  function embeddingIsReady() {
+    return state.modelStatus?.embedding?.status === "UP";
+  }
+
+  function updateReindexButtons() {
+    const ready = embeddingIsReady();
+    document.querySelectorAll(
+      "[data-action='reindex-missing'], [data-doc-action='reindex'], [data-detail-action='reindex']",
+    ).forEach((button) => {
+      button.disabled = !ready;
+      button.title = ready ? "" : "请先启动并正确配置 Embedding 模型";
+    });
+  }
+
+  async function loadReindexJobs() {
+    try {
+      const jobs = await api("/internal/v1/admin/reindex/jobs?limit=10");
+      const wasActive = state.reindexActiveCount > 0;
+      state.reindexActiveCount = Number(jobs.active_count) || 0;
+      renderReindexJobs(jobs);
+      if (state.reindexActiveCount > 0) {
+        scheduleReindexPolling();
+      } else {
+        stopReindexPolling();
+        if (wasActive) {
+          await Promise.allSettled([
+            loadOverview(),
+            loadDocuments(),
+            loadKnowledgeBases(),
+          ]);
+        }
+      }
+    } catch (error) {
+      handleRequestError(error, "索引任务读取失败");
+      if (state.reindexActiveCount > 0) {
+        scheduleReindexPolling();
+      }
+    }
+  }
+
+  function renderReindexJobs(jobs) {
+    const items = Array.isArray(jobs.items) ? jobs.items : [];
+    const latest = items[0];
+    if (Number(jobs.active_count) > 0) {
+      elements.reindexJobSummary.textContent = `${formatNumber(jobs.active_count)} 个任务处理中`;
+    } else if (latest?.status === "FAILED") {
+      elements.reindexJobSummary.textContent = "最近任务失败";
+    } else if (latest?.status === "SUCCEEDED") {
+      elements.reindexJobSummary.textContent = "最近任务已完成";
+    } else {
+      elements.reindexJobSummary.textContent = "暂无运行任务";
+    }
+    if (!latest) {
+      elements.reindexJobDetail.textContent = "可补齐尚未生成的文档向量";
+      elements.reindexJobDetail.title = "";
+      return;
+    }
+    const title = latest.document_title || "未知文档";
+    const progress = describeReindexJob(latest);
+    elements.reindexJobDetail.textContent = `${title} · ${progress}`;
+    elements.reindexJobDetail.title = String(latest.error_message || "");
+  }
+
+  function describeReindexJob(job) {
+    if (job.status === "QUEUED") return "等待处理";
+    if (job.status === "RETRYING") return `等待重试（第 ${formatNumber(job.attempt)} 次）`;
+    if (job.status === "SUCCEEDED") return `完成于 ${formatDate(job.finished_at)}`;
+    if (job.status === "FAILED") return job.error_code || "处理失败";
+    if (String(job.stage || "").startsWith("EMBEDDING:")) {
+      const [processed, total] = String(job.stage).slice(10).split("/");
+      return `向量化 ${processed}/${total}`;
+    }
+    const stages = {
+      READING_SOURCE: "读取知识块",
+      COMMITTING: "写入向量索引",
+    };
+    return stages[job.stage] || "重建索引中";
+  }
+
+  function scheduleReindexPolling() {
+    stopReindexPolling();
+    state.reindexPollTimer = window.setTimeout(() => {
+      void loadReindexJobs();
+    }, 1500);
+  }
+
+  function stopReindexPolling() {
+    window.clearTimeout(state.reindexPollTimer);
+    state.reindexPollTimer = null;
+  }
+
+  async function enqueueMissingVectorJobs(trigger) {
+    if (!embeddingIsReady()) {
+      showToast("Embedding 尚不可用", "请先启动模型服务并确认向量维度为 1024。", "error");
+      return;
+    }
+    document.querySelectorAll("[data-action='reindex-missing']").forEach((button) => {
+      button.disabled = true;
+    });
+    try {
+      const result = await api("/internal/v1/admin/reindex", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ only_missing_vectors: true }),
+      });
+      if (Number(result.queued_count) > 0) {
+        showToast("向量任务已创建", `${formatNumber(result.queued_count)} 份文档进入后台队列。`);
+        state.reindexActiveCount = Math.max(
+          state.reindexActiveCount,
+          Number(result.queued_count),
+        );
+      } else if (Number(result.already_queued_count) > 0) {
+        showToast("任务正在处理中", "匹配的文档已在重建队列中。");
+      } else {
+        showToast("向量已经完整", "当前文档无需补建向量索引。");
+      }
+      await loadReindexJobs();
+    } catch (error) {
+      handleRequestError(error, "批量重建索引失败");
+    } finally {
+      if (trigger) trigger.disabled = false;
+      updateReindexButtons();
+    }
+  }
+
+  async function enqueueDocumentReindex(documentId, trigger) {
+    if (!embeddingIsReady()) {
+      showToast("Embedding 尚不可用", "请先启动模型服务并检查模型状态。", "error");
+      return;
+    }
+    if (trigger) trigger.disabled = true;
+    try {
+      const result = await api(
+        `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/reindex`,
+        { method: "POST" },
+      );
+      showToast(
+        result.created ? "重建任务已创建" : "文档正在重建",
+        result.created ? "任务将在后台生成并写入向量。" : "无需重复创建任务。",
+      );
+      state.reindexActiveCount = Math.max(state.reindexActiveCount, 1);
+      await loadReindexJobs();
+    } catch (error) {
+      handleRequestError(error, "文档向量重建失败");
+    } finally {
+      if (trigger) trigger.disabled = false;
+      updateReindexButtons();
+    }
+  }
+
   function closeDialog(dialog) {
     if (dialog?.open) {
       dialog.close();
@@ -796,6 +1016,7 @@
       state.token = "";
       state.session = null;
       storeToken("");
+      stopReindexPolling();
       closeDialog(elements.uploadDialog);
       closeDialog(elements.detailDialog);
       showAuth("已安全退出当前管理会话。");
@@ -809,6 +1030,9 @@
     });
     document.querySelectorAll("[data-action='upload']").forEach((button) => {
       button.addEventListener("click", () => openUploadDialog());
+    });
+    document.querySelectorAll("[data-action='reindex-missing']").forEach((button) => {
+      button.addEventListener("click", () => enqueueMissingVectorJobs(button));
     });
     document.querySelectorAll("[data-close-dialog]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -851,6 +1075,9 @@
     });
     elements.refreshDocuments.addEventListener("click", () => loadDocuments());
     elements.refreshHealth.addEventListener("click", () => loadHealth());
+    elements.refreshModels.addEventListener("click", () => {
+      void Promise.allSettled([loadModelStatus(), loadReindexJobs()]);
+    });
     elements.previousPage.addEventListener("click", () => {
       if (state.page > 0) {
         state.page -= 1;
@@ -872,6 +1099,8 @@
         openDocumentDetail(documentId);
       } else if (trigger.dataset.docAction === "version") {
         openUploadDialog(findDocument(documentId));
+      } else if (trigger.dataset.docAction === "reindex") {
+        enqueueDocumentReindex(documentId, trigger);
       } else if (trigger.dataset.docAction === "state") {
         setDocumentState(documentId, trigger.dataset.active === "true", trigger);
       }
@@ -885,6 +1114,8 @@
         const documentItem = findDocument(documentId);
         closeDialog(elements.detailDialog);
         openUploadDialog(documentItem);
+      } else if (trigger.dataset.detailAction === "reindex") {
+        enqueueDocumentReindex(documentId, trigger);
       } else if (trigger.dataset.detailAction === "state") {
         setDocumentState(documentId, trigger.dataset.active === "true", trigger);
       }

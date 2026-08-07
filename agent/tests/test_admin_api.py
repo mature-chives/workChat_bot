@@ -21,6 +21,8 @@ class FakeRepository:
     def __init__(self) -> None:
         self.list_arguments: tuple[object, ...] | None = None
         self.state_arguments: tuple[object, ...] | None = None
+        self.reindex_arguments: tuple[object, ...] | None = None
+        self.batch_reindex_arguments: tuple[object, ...] | None = None
 
     async def get_admin_overview(self, tenant_id: str) -> dict[str, object]:
         assert tenant_id == TENANT_ID
@@ -88,6 +90,70 @@ class FakeRepository:
             raise InvalidRequest("document must be reindexed before activation")
         return "READY" if active else "DISABLED"
 
+    async def enqueue_document_reindex(
+        self,
+        tenant_id: str,
+        document_id: str,
+    ) -> dict[str, object]:
+        self.reindex_arguments = (tenant_id, document_id)
+        if document_id == MISSING_DOCUMENT_ID:
+            raise ResourceNotFound("document not found")
+        if document_id == CONFLICT_DOCUMENT_ID:
+            raise InvalidRequest("document has no chunks to reindex")
+        return {
+            "job_id": "00000000-0000-0000-0000-000000000301",
+            "document_id": document_id,
+            "status": "QUEUED",
+            "created": True,
+        }
+
+    async def enqueue_reindex_jobs(
+        self,
+        tenant_id: str,
+        knowledge_base_id: str | None,
+        only_missing_vectors: bool,
+    ) -> dict[str, object]:
+        self.batch_reindex_arguments = (
+            tenant_id,
+            knowledge_base_id,
+            only_missing_vectors,
+        )
+        return {
+            "eligible_count": 2,
+            "queued_count": 2,
+            "already_queued_count": 0,
+            "jobs": [],
+        }
+
+    async def list_reindex_jobs(self, tenant_id: str, limit: int) -> dict[str, object]:
+        assert tenant_id == TENANT_ID
+        return {
+            "items": [],
+            "queued_count": 0,
+            "in_progress_count": 0,
+            "retrying_count": 0,
+            "succeeded_count": 1,
+            "failed_count": 0,
+            "active_count": 0,
+            "limit": limit,
+        }
+
+
+class FakeModelClient:
+    def __init__(
+        self,
+        model: str,
+        *,
+        enabled: bool = True,
+        dimension: int | None = None,
+    ) -> None:
+        self.model = model
+        self.enabled = enabled
+        self.dimension = dimension
+
+    async def probe(self) -> int | None:
+        return self.dimension
+
 
 def build_client(
     repository: FakeRepository | None = None,
@@ -102,6 +168,8 @@ def build_client(
     actual_repository = repository or FakeRepository()
     app = FastAPI()
     app.state.repository = actual_repository
+    app.state.llm = FakeModelClient("Qwen3.5-4B")
+    app.state.embedding = FakeModelClient("bge-m3", dimension=1024)
     app.include_router(
         create_admin_router(settings, create_admin_dependency(settings)),
     )
@@ -268,6 +336,85 @@ def test_admin_document_state_requires_boolean() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_admin_model_status() -> None:
+    client, _repository = build_client()
+
+    response = client.get(
+        "/internal/v1/admin/models/status",
+        headers=admin_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["llm"] == {
+        "configured": True,
+        "model": "Qwen3.5-4B",
+        "status": "UP",
+        "detail": "model is available",
+    }
+    assert response.json()["embedding"]["status"] == "UP"
+    assert response.json()["embedding"]["dimension"] == 1024
+
+
+def test_admin_enqueues_document_reindex() -> None:
+    client, repository = build_client()
+
+    response = client.post(
+        f"/internal/v1/admin/documents/{DOCUMENT_ID}/reindex",
+        headers=admin_headers(),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "QUEUED"
+    assert repository.reindex_arguments == (TENANT_ID, DOCUMENT_ID)
+
+
+def test_admin_enqueues_batch_reindex_and_lists_jobs() -> None:
+    client, repository = build_client()
+
+    enqueue = client.post(
+        "/internal/v1/admin/reindex",
+        headers=admin_headers(),
+        json={
+            "knowledge_base_id": KNOWLEDGE_BASE_ID,
+            "only_missing_vectors": False,
+        },
+    )
+    jobs = client.get(
+        "/internal/v1/admin/reindex/jobs",
+        headers=admin_headers(),
+        params={"limit": 5},
+    )
+
+    assert enqueue.status_code == 202
+    assert enqueue.json()["queued_count"] == 2
+    assert repository.batch_reindex_arguments == (
+        TENANT_ID,
+        KNOWLEDGE_BASE_ID,
+        False,
+    )
+    assert jobs.status_code == 200
+    assert jobs.json()["succeeded_count"] == 1
+    assert jobs.json()["limit"] == 5
+
+
+@pytest.mark.parametrize(
+    ("document_id", "expected_status"),
+    [("not-a-uuid", 400), (MISSING_DOCUMENT_ID, 404), (CONFLICT_DOCUMENT_ID, 409)],
+)
+def test_admin_document_reindex_maps_errors(
+    document_id: str,
+    expected_status: int,
+) -> None:
+    client, _repository = build_client()
+
+    response = client.post(
+        f"/internal/v1/admin/documents/{document_id}/reindex",
+        headers=admin_headers(),
+    )
+
+    assert response.status_code == expected_status
 
 
 def test_http_app_serves_console_and_protects_document_upload() -> None:
