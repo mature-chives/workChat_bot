@@ -357,25 +357,28 @@ FastAPI 仅用于运维和受控评测：
 - Reranker 在允许融合排序回退时可标记 `DEGRADED`；
 - `agent-worker` 的 readiness 另检查 Redis、MinIO、数据库和 Embedding。
 
-### 5.4 `POST /internal/v1/evaluation/query`
+### 5.4 `POST /internal/v1/admin/rag/evaluate`
 
-仅在 `agent.http.evaluation_enabled=true` 时注册。请求：
+使用 `X-Internal-Token` 保护的批量 RAG 评测接口。每批最多 20 题，按顺序调用真实 Query Service，避免本地模型被评测并发压垮。请求：
 
 ```json
 {
-  "request_id": "01JABCDEF0123456789",
-  "tenant_id": "0198a111-1111-7111-8111-111111111111",
-  "user_id": "0198a222-2222-7222-8222-222222222222",
-  "conversation_id": null,
-  "question": "客户开户需要哪些资料？",
-  "knowledge_base_ids": [],
-  "channel": "EVAL"
+  "user_id": null,
+  "knowledge_base_ids": ["0198a111-1111-7111-8111-111111111111"],
+  "cases": [
+    {
+      "question": "客户开户需要哪些资料？",
+      "expected_keywords": ["营业执照", "法人身份证"],
+      "expected_sources": ["客户开户指引"],
+      "expect_refusal": false
+    }
+  ]
 }
 ```
 
-响应字段与 gRPC `AnswerQuestionResponse` 一致，但使用 `snake_case`。该端点调用同一个 Query Application Service，不允许实现简化版 RAG。
+响应包含批次 ID、实际评测用户、整体指标和逐题结果。整体指标包括通过率、引用率、关键词召回、来源命中、拒答准确率、平均延迟、P50、P95、吞吐量和错误数。逐题结果包含回答、引用、命中明细、耗时与错误码。
 
-评测请求仍执行真实 ACL。需要测试不同权限时，必须准备对应测试用户，不提供 `skip_acl`、`admin_mode` 或任意上下文注入参数。
+评测请求仍执行真实 ACL。`user_id` 为空时使用专用普通评测用户，只能访问 `ALL_EMPLOYEES` 授权的知识；指定用户时按该用户的实时部门、角色和个人权限执行，不提供 `skip_acl` 或管理员绕过。问题、回答和引用按 `EVAL` 渠道持久化，批次汇总当前由管理后台展示和导出 JSON。
 
 ### 5.5 `GET /metrics`
 

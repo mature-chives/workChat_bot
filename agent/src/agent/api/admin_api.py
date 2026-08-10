@@ -7,9 +7,10 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, Field, StrictBool, StringConstraints
 
 from agent import __version__
+from agent.application.evaluation import RagEvaluationCase
 from agent.application.models import DependencyUnavailable, InvalidRequest, ResourceNotFound
 from agent.settings import Settings
 
@@ -32,6 +33,29 @@ class DocumentStateRequest(BaseModel):
 class BatchReindexRequest(BaseModel):
     knowledge_base_id: str | None = None
     only_missing_vectors: StrictBool = True
+
+
+EvaluationQuestion = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=4000),
+]
+EvaluationExpectation = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=300),
+]
+
+
+class RagEvaluationCaseRequest(BaseModel):
+    question: EvaluationQuestion
+    expected_keywords: list[EvaluationExpectation] = Field(default_factory=list, max_length=20)
+    expected_sources: list[EvaluationExpectation] = Field(default_factory=list, max_length=20)
+    expect_refusal: StrictBool = False
+
+
+class RagEvaluationRequest(BaseModel):
+    user_id: str | None = None
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=20)
+    cases: list[RagEvaluationCaseRequest] = Field(min_length=1, max_length=20)
 
 
 def create_admin_dependency(settings: Settings) -> Callable[..., None]:
@@ -97,6 +121,31 @@ def create_admin_router(
             ),
         )
         return {"llm": llm_status, "embedding": embedding_status}
+
+    @router.post("/rag/evaluate")
+    async def evaluate_rag(
+        request: Request,
+        payload: RagEvaluationRequest,
+    ) -> dict[str, object]:
+        if payload.user_id is not None:
+            _validate_uuid(payload.user_id, "user_id")
+        for knowledge_base_id in payload.knowledge_base_ids:
+            _validate_uuid(knowledge_base_id, "knowledge_base_id")
+        cases = tuple(
+            RagEvaluationCase(
+                question=item.question,
+                expected_keywords=tuple(dict.fromkeys(item.expected_keywords)),
+                expected_sources=tuple(dict.fromkeys(item.expected_sources)),
+                expect_refusal=item.expect_refusal,
+            )
+            for item in payload.cases
+        )
+        return await request.app.state.rag_evaluation.evaluate(
+            tenant_id=settings.tenant_id,
+            user_id=payload.user_id,
+            knowledge_base_ids=tuple(dict.fromkeys(payload.knowledge_base_ids)),
+            cases=cases,
+        )
 
     @router.get("/reindex/jobs")
     async def reindex_jobs(

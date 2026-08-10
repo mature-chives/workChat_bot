@@ -1024,6 +1024,27 @@ class PostgresRepository:
             )
             return ClaimedRun(actual_conversation_id)
 
+    async def ensure_evaluation_user(self, tenant_id: str) -> str:
+        user_id = await self._pool.fetchval(
+            """
+            INSERT INTO users (
+                tenant_id, wecom_user_id, display_name, status
+            ) VALUES (
+                $1::uuid, '__rag_evaluation__', 'RAG 评测用户', 'ACTIVE'
+            )
+            ON CONFLICT (tenant_id, wecom_user_id)
+            DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                status = 'ACTIVE',
+                updated_at = now()
+            RETURNING id::text
+            """,
+            tenant_id,
+        )
+        if user_id is None:
+            raise RuntimeError("evaluation user was not created")
+        return str(user_id)
+
     async def search_keyword(
         self,
         tenant_id: str,

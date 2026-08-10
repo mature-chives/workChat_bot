@@ -26,6 +26,7 @@
       <symbol id="icon-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></symbol>
       <symbol id="icon-spark" viewBox="0 0 24 24"><path d="m12 2 1.6 5.4L19 9l-5.4 1.6L12 16l-1.6-5.4L5 9l5.4-1.6zM19 16l.7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7z"/></symbol>
       <symbol id="icon-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v5M15 1v5M9 18v5M15 18v5M1 9h5M1 15h5M18 9h5M18 15h5"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
+      <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/><path d="m4 7 6-4 6 6 5-4"/></symbol>
     </svg>
 
     <div class="app-shell" id="appShell" aria-hidden="true">
@@ -41,6 +42,9 @@
           </button>
           <button class="nav-item" type="button" data-section="documents">
             <svg><use href="#icon-file"></use></svg><span>知识文档</span><span class="nav-count" id="navDocumentCount">0</span>
+          </button>
+          <button class="nav-item" type="button" data-section="evaluation">
+            <svg><use href="#icon-chart"></use></svg><span>RAG 评测</span>
           </button>
         </nav>
 
@@ -168,6 +172,53 @@
               <div class="pagination"><button class="secondary-button small" id="previousPage" type="button">上一页</button><span id="pageIndicator">第 1 页</span><button class="secondary-button small" id="nextPage" type="button">下一页</button></div>
             </div>
           </section>
+
+          <section class="page-section" id="section-evaluation" data-page="evaluation">
+            <div class="page-title-row">
+              <div><p class="eyebrow">RAG EVALUATION</p><h1>检索增强评测</h1><p>用可复现的问题集评估回答质量、引用命中和端到端延迟。</p></div>
+              <div class="page-title-actions">
+                <button class="secondary-button" id="exportEvaluation" type="button" hidden>导出结果</button>
+                <button class="primary-button" id="runEvaluationTop" type="button"><svg><use href="#icon-chart"></use></svg>开始评测</button>
+              </div>
+            </div>
+
+            <form id="ragEvaluationForm" class="evaluation-layout">
+              <div class="evaluation-inputs">
+                <article class="panel evaluation-config">
+                  <div class="panel-heading">
+                    <div><p class="panel-kicker">EVALUATION SCOPE</p><h2>评测范围</h2></div>
+                    <span class="evaluation-limit">最多 20 题 · 顺序执行</span>
+                  </div>
+                  <div class="evaluation-config-grid">
+                    <label class="select-field"><span>知识库范围</span><select id="evaluationKnowledgeBase"><option value="">全部有权限知识库</option></select></label>
+                    <label class="evaluation-field"><span>ACL 测试用户 ID（可选）</span><input id="evaluationUserId" type="text" placeholder="留空使用普通权限评测用户"></label>
+                  </div>
+                  <p class="evaluation-help">留空用户 ID 时，系统使用专用评测用户，只能访问向全员开放的知识。指定真实用户 ID 可验证部门、角色或个人 ACL。</p>
+                </article>
+
+                <article class="panel evaluation-suite">
+                  <div class="panel-heading">
+                    <div><p class="panel-kicker">TEST SUITE</p><h2>问题集</h2></div>
+                    <button class="secondary-button small" id="addEvaluationCase" type="button"><svg><use href="#icon-plus"></use></svg>添加问题</button>
+                  </div>
+                  <div class="evaluation-cases" id="evaluationCases"></div>
+                  <div class="evaluation-actions">
+                    <span id="evaluationCaseSummary">1 道评测题</span>
+                    <button class="primary-button" id="runEvaluation" type="submit"><svg><use href="#icon-chart"></use></svg><span>运行评测</span></button>
+                  </div>
+                </article>
+              </div>
+
+              <aside class="panel evaluation-output" id="evaluationOutput">
+                <div class="evaluation-empty" id="evaluationEmpty">
+                  <span><svg><use href="#icon-chart"></use></svg></span>
+                  <h2>等待运行评测</h2>
+                  <p>结果会展示通过率、关键词召回、来源命中、引用率以及平均、P50、P95 延迟。</p>
+                </div>
+                <div id="evaluationResults" hidden></div>
+              </aside>
+            </form>
+          </section>
         </main>
       </div>
     </div>
@@ -212,6 +263,21 @@
         <div id="detailContent"><div class="detail-loading"><span></span><p>读取文档详情…</p></div></div>
       </div>
     </dialog>
+
+    <template id="evaluationCaseTemplate">
+      <article class="evaluation-case">
+        <div class="evaluation-case-heading">
+          <span class="evaluation-case-number">题目 1</span>
+          <button class="mini-action danger" type="button" data-evaluation-action="remove">移除</button>
+        </div>
+        <label class="evaluation-field evaluation-question"><span>问题 <b>*</b></span><textarea data-evaluation-field="question" maxlength="4000" placeholder="例如：客户开户需要哪些资料？" required></textarea></label>
+        <div class="evaluation-expectations">
+          <label class="evaluation-field"><span>期望关键词</span><input data-evaluation-field="keywords" type="text" maxlength="1000" placeholder="营业执照，法人身份证"></label>
+          <label class="evaluation-field"><span>期望来源标题</span><input data-evaluation-field="sources" type="text" maxlength="1000" placeholder="客户开户指引"></label>
+        </div>
+        <label class="evaluation-refusal"><input data-evaluation-field="refusal" type="checkbox"><span>该问题应被拒答（知识库中没有足够依据）</span></label>
+      </article>
+    </template>
 
     <div class="toast-region" id="toastRegion" aria-live="polite"></div>
   </body>

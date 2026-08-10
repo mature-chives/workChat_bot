@@ -30,6 +30,8 @@
     modelStatus: null,
     reindexActiveCount: 0,
     reindexPollTimer: null,
+    evaluationRunning: false,
+    lastEvaluation: null,
   };
 
   const elements = {
@@ -90,6 +92,19 @@
     sidebar: document.querySelector("#sidebar"),
     sidebarBackdrop: document.querySelector("#sidebarBackdrop"),
     mobileMenu: document.querySelector("#mobileMenu"),
+    ragEvaluationForm: document.querySelector("#ragEvaluationForm"),
+    evaluationKnowledgeBase: document.querySelector("#evaluationKnowledgeBase"),
+    evaluationUserId: document.querySelector("#evaluationUserId"),
+    evaluationCases: document.querySelector("#evaluationCases"),
+    evaluationCaseTemplate: document.querySelector("#evaluationCaseTemplate"),
+    evaluationCaseSummary: document.querySelector("#evaluationCaseSummary"),
+    addEvaluationCase: document.querySelector("#addEvaluationCase"),
+    runEvaluation: document.querySelector("#runEvaluation"),
+    runEvaluationTop: document.querySelector("#runEvaluationTop"),
+    exportEvaluation: document.querySelector("#exportEvaluation"),
+    evaluationOutput: document.querySelector("#evaluationOutput"),
+    evaluationEmpty: document.querySelector("#evaluationEmpty"),
+    evaluationResults: document.querySelector("#evaluationResults"),
   };
 
   class ApiError extends Error {
@@ -133,6 +148,18 @@
     }
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? "—" : dateFormatter.format(date).replace("24:", "00:");
+  }
+
+  function formatRate(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+      return "—";
+    }
+    return `${(Number(value) * 100).toFixed(1)}%`;
+  }
+
+  function formatLatency(value) {
+    const latency = Number(value);
+    return Number.isFinite(latency) ? `${latency.toFixed(latency >= 100 ? 0 : 1)} ms` : "—";
   }
 
   function fileExtension(fileName) {
@@ -365,6 +392,7 @@
   function populateKnowledgeBaseSelects() {
     const filterValue = elements.knowledgeFilter.value;
     const uploadValue = elements.uploadKnowledgeBase.value;
+    const evaluationValue = elements.evaluationKnowledgeBase.value;
     replaceSelectOptions(elements.knowledgeFilter, "全部知识库", state.knowledgeBases, filterValue);
     replaceSelectOptions(
       elements.uploadKnowledgeBase,
@@ -372,12 +400,191 @@
       state.knowledgeBases,
       uploadValue,
     );
+    replaceSelectOptions(
+      elements.evaluationKnowledgeBase,
+      "全部有权限知识库",
+      state.knowledgeBases,
+      evaluationValue,
+    );
     const activeOptions = [...elements.uploadKnowledgeBase.options].filter(
       (option) => option.value && !option.disabled,
     );
     if (!elements.uploadKnowledgeBase.value && activeOptions.length === 1) {
       elements.uploadKnowledgeBase.value = activeOptions[0].value;
     }
+  }
+
+  function addRagEvaluationCase(initial = {}) {
+    const count = elements.evaluationCases.querySelectorAll(".evaluation-case").length;
+    if (count >= 20) {
+      showToast("最多添加 20 道题", "本地模型评测会按顺序执行。", "error");
+      return;
+    }
+    const fragment = elements.evaluationCaseTemplate.content.cloneNode(true);
+    const card = fragment.querySelector(".evaluation-case");
+    card.querySelector("[data-evaluation-field='question']").value = initial.question || "";
+    card.querySelector("[data-evaluation-field='keywords']").value = initial.keywords || "";
+    card.querySelector("[data-evaluation-field='sources']").value = initial.sources || "";
+    card.querySelector("[data-evaluation-field='refusal']").checked = Boolean(initial.refusal);
+    elements.evaluationCases.append(fragment);
+    updateRagEvaluationCases();
+  }
+
+  function updateRagEvaluationCases() {
+    const cards = [...elements.evaluationCases.querySelectorAll(".evaluation-case")];
+    cards.forEach((card, index) => {
+      card.querySelector(".evaluation-case-number").textContent = `题目 ${index + 1}`;
+      card.querySelector("[data-evaluation-action='remove']").disabled = cards.length === 1;
+    });
+    elements.evaluationCaseSummary.textContent = `${cards.length} 道评测题`;
+    elements.addEvaluationCase.disabled = cards.length >= 20 || state.evaluationRunning;
+  }
+
+  function splitExpectations(value) {
+    return [...new Set(String(value || "").split(/[,，]/).map((item) => item.trim()).filter(Boolean))];
+  }
+
+  function collectRagEvaluationCases() {
+    return [...elements.evaluationCases.querySelectorAll(".evaluation-case")].map((card) => ({
+      question: card.querySelector("[data-evaluation-field='question']").value.trim(),
+      expected_keywords: splitExpectations(
+        card.querySelector("[data-evaluation-field='keywords']").value,
+      ),
+      expected_sources: splitExpectations(
+        card.querySelector("[data-evaluation-field='sources']").value,
+      ),
+      expect_refusal: card.querySelector("[data-evaluation-field='refusal']").checked,
+    }));
+  }
+
+  function setRagEvaluationRunning(running) {
+    state.evaluationRunning = running;
+    elements.runEvaluation.disabled = running;
+    elements.runEvaluationTop.disabled = running;
+    elements.runEvaluation.querySelector("span").textContent = running ? "正在逐题评测…" : "运行评测";
+    elements.runEvaluationTop.lastChild.textContent = running ? "评测运行中" : "开始评测";
+    elements.evaluationOutput.classList.toggle("running", running);
+    updateRagEvaluationCases();
+  }
+
+  async function runRagEvaluation(event) {
+    event?.preventDefault();
+    if (state.evaluationRunning || !elements.ragEvaluationForm.reportValidity()) {
+      return;
+    }
+    const cases = collectRagEvaluationCases();
+    if (!cases.length || cases.some((item) => !item.question)) {
+      showToast("评测题不完整", "请填写每一道题的问题。", "error");
+      return;
+    }
+
+    const knowledgeBaseId = elements.evaluationKnowledgeBase.value;
+    const userId = elements.evaluationUserId.value.trim();
+    setRagEvaluationRunning(true);
+    elements.evaluationEmpty.hidden = false;
+    elements.evaluationResults.hidden = true;
+    elements.evaluationEmpty.innerHTML = `
+      <span class="evaluation-spinner"><svg><use href="#icon-refresh"></use></svg></span>
+      <h2>正在运行 ${cases.length} 道评测题</h2>
+      <p>每道题都会执行真实权限过滤、混合检索、本地模型生成和引用校验。</p>`;
+    try {
+      const result = await api("/internal/v1/admin/rag/evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: userId || null,
+          knowledge_base_ids: knowledgeBaseId ? [knowledgeBaseId] : [],
+          cases,
+        }),
+      });
+      state.lastEvaluation = result;
+      renderRagEvaluation(result);
+      elements.exportEvaluation.hidden = false;
+      showToast("RAG 评测完成", `${result.summary.passed_cases} / ${result.summary.total_cases} 道题通过。`);
+    } catch (error) {
+      elements.evaluationEmpty.hidden = false;
+      elements.evaluationResults.hidden = true;
+      elements.evaluationEmpty.innerHTML = `
+        <span><svg><use href="#icon-chart"></use></svg></span>
+        <h2>评测未完成</h2>
+        <p>${escapeHtml(error instanceof Error ? error.message : "未知错误")}</p>`;
+      handleRequestError(error, "RAG 评测失败");
+    } finally {
+      setRagEvaluationRunning(false);
+    }
+  }
+
+  function renderMatchChips(items) {
+    if (!Array.isArray(items) || !items.length) {
+      return '<span class="evaluation-none">未设置</span>';
+    }
+    return items.map((item) => `
+      <span class="evaluation-chip ${item.matched ? "matched" : "missed"}">
+        ${item.matched ? "✓" : "×"} ${escapeHtml(item.value)}
+      </span>`).join("");
+  }
+
+  function renderRagEvaluation(result) {
+    const summary = result.summary || {};
+    const cases = Array.isArray(result.cases) ? result.cases : [];
+    const caseHtml = cases.map((item) => {
+      const citations = Array.isArray(item.citations) ? item.citations : [];
+      const citationHtml = citations.length ? citations.map((citation) => `
+        <span class="evaluation-citation">[${formatNumber(citation.index)}] ${escapeHtml(citation.title)} · ${escapeHtml(citation.locator_value || citation.locator_type || "")}</span>`).join("") : '<span class="evaluation-none">无引用</span>';
+      const resultClass = item.error_code ? "error" : item.passed ? "passed" : "failed";
+      const resultLabel = item.error_code ? "执行错误" : item.passed ? "通过" : "未通过";
+      const answer = item.error_code
+        ? `<div class="evaluation-case-error">${escapeHtml(item.error_code)} · ${escapeHtml(item.error_message)}</div>`
+        : `<p class="evaluation-answer">${escapeHtml(item.answer || "无回答")}</p>`;
+      return `
+        <article class="evaluation-result-case ${resultClass}">
+          <header>
+            <span class="evaluation-result-index">${formatNumber(item.index)}</span>
+            <div><strong>${escapeHtml(item.question)}</strong><small>${formatLatency(item.latency_ms)} · ${item.refused ? `拒答 ${escapeHtml(item.refusal_reason || "")}` : `${citations.length} 条引用`}</small></div>
+            <span class="evaluation-result-badge">${resultLabel}</span>
+          </header>
+          ${answer}
+          <div class="evaluation-check-row"><span>关键词</span><div>${renderMatchChips(item.keyword_matches)}</div></div>
+          <div class="evaluation-check-row"><span>来源</span><div>${renderMatchChips(item.source_matches)}</div></div>
+          <div class="evaluation-check-row"><span>引用</span><div>${citationHtml}</div></div>
+        </article>`;
+    }).join("");
+
+    elements.evaluationResults.innerHTML = `
+      <div class="evaluation-result-heading">
+        <div><p class="panel-kicker">EVALUATION REPORT</p><h2>评测结果</h2></div>
+        <span>${formatNumber(summary.passed_cases)} / ${formatNumber(summary.total_cases)} 通过</span>
+      </div>
+      <div class="evaluation-metrics">
+        <div><span>通过率</span><strong>${formatRate(summary.pass_rate)}</strong></div>
+        <div><span>引用率</span><strong>${formatRate(summary.citation_rate)}</strong></div>
+        <div><span>关键词召回</span><strong>${formatRate(summary.keyword_recall)}</strong></div>
+        <div><span>来源命中</span><strong>${formatRate(summary.source_hit_rate)}</strong></div>
+        <div><span>平均延迟</span><strong>${formatLatency(summary.average_latency_ms)}</strong></div>
+        <div><span>P95 延迟</span><strong>${formatLatency(summary.p95_latency_ms)}</strong></div>
+      </div>
+      <div class="evaluation-report-meta">
+        <span>拒答准确率 ${formatRate(summary.refusal_accuracy)}</span>
+        <span>P50 ${formatLatency(summary.p50_latency_ms)}</span>
+        <span>吞吐 ${Number(summary.queries_per_second || 0).toFixed(2)} 题/秒</span>
+        <span>错误 ${formatNumber(summary.error_cases)}</span>
+      </div>
+      <div class="evaluation-result-cases">${caseHtml}</div>`;
+    elements.evaluationEmpty.hidden = true;
+    elements.evaluationResults.hidden = false;
+  }
+
+  function exportRagEvaluation() {
+    if (!state.lastEvaluation) return;
+    const blob = new Blob([JSON.stringify(state.lastEvaluation, null, 2)], {
+      type: "application/json;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `rag-evaluation-${state.lastEvaluation.evaluation_id || Date.now()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   function documentQuery() {
@@ -975,7 +1182,8 @@
     document.querySelectorAll(".nav-item").forEach((item) => {
       item.classList.toggle("active", item.dataset.section === section);
     });
-    elements.breadcrumbCurrent.textContent = section === "documents" ? "知识文档" : "工作台";
+    const labels = { overview: "工作台", documents: "知识文档", evaluation: "RAG 评测" };
+    elements.breadcrumbCurrent.textContent = labels[section] || "工作台";
     elements.sidebar.classList.remove("open");
     elements.sidebarBackdrop.classList.remove("open");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1127,6 +1335,18 @@
       }
     });
     elements.uploadForm.addEventListener("submit", submitUpload);
+    elements.ragEvaluationForm.addEventListener("submit", runRagEvaluation);
+    elements.runEvaluationTop.addEventListener("click", () => {
+      elements.ragEvaluationForm.requestSubmit();
+    });
+    elements.addEvaluationCase.addEventListener("click", () => addRagEvaluationCase());
+    elements.evaluationCases.addEventListener("click", (event) => {
+      const trigger = event.target.closest("[data-evaluation-action='remove']");
+      if (!trigger || state.evaluationRunning) return;
+      trigger.closest(".evaluation-case")?.remove();
+      updateRagEvaluationCases();
+    });
+    elements.exportEvaluation.addEventListener("click", exportRagEvaluation);
     elements.uploadFile.addEventListener("change", () => updateSelectedFile(elements.uploadFile.files[0]));
     ["dragenter", "dragover"].forEach((name) => {
       elements.dropZone.addEventListener(name, (event) => {
@@ -1150,6 +1370,7 @@
 
   async function initialize() {
     bindEvents();
+    addRagEvaluationCase();
     const storedToken = readStoredToken();
     if (!storedToken) {
       showAuth();

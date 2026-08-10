@@ -10,6 +10,7 @@ from agent.application.models import InvalidRequest, ResourceNotFound
 from agent.settings import Settings
 
 TENANT_ID = "00000000-0000-0000-0000-000000000001"
+USER_ID = "00000000-0000-0000-0000-000000000011"
 KNOWLEDGE_BASE_ID = "00000000-0000-0000-0000-000000000101"
 DOCUMENT_ID = "00000000-0000-0000-0000-000000000201"
 MISSING_DOCUMENT_ID = "00000000-0000-0000-0000-000000000404"
@@ -155,6 +156,26 @@ class FakeModelClient:
         return self.dimension
 
 
+class FakeRagEvaluationService:
+    def __init__(self) -> None:
+        self.arguments: dict[str, object] | None = None
+
+    async def evaluate(self, **kwargs: object) -> dict[str, object]:
+        self.arguments = kwargs
+        return {
+            "evaluation_id": "evaluation-1",
+            "user_id": USER_ID,
+            "knowledge_base_ids": [KNOWLEDGE_BASE_ID],
+            "summary": {
+                "total_cases": 1,
+                "passed_cases": 1,
+                "pass_rate": 1.0,
+                "p95_latency_ms": 125.0,
+            },
+            "cases": [{"index": 1, "passed": True}],
+        }
+
+
 def build_client(
     repository: FakeRepository | None = None,
     *,
@@ -170,6 +191,7 @@ def build_client(
     app.state.repository = actual_repository
     app.state.llm = FakeModelClient("Qwen3.5-4B")
     app.state.embedding = FakeModelClient("bge-m3", dimension=1024)
+    app.state.rag_evaluation = FakeRagEvaluationService()
     app.include_router(
         create_admin_router(settings, create_admin_dependency(settings)),
     )
@@ -357,6 +379,57 @@ def test_admin_model_status() -> None:
     assert response.json()["embedding"]["dimension"] == 1024
 
 
+def test_admin_runs_rag_evaluation_with_real_acl_scope() -> None:
+    client, _repository = build_client()
+
+    response = client.post(
+        "/internal/v1/admin/rag/evaluate",
+        headers=admin_headers(),
+        json={
+            "user_id": USER_ID,
+            "knowledge_base_ids": [KNOWLEDGE_BASE_ID, KNOWLEDGE_BASE_ID],
+            "cases": [
+                {
+                    "question": "  客户开户需要哪些资料？  ",
+                    "expected_keywords": ["营业执照", "营业执照"],
+                    "expected_sources": ["客户开户指引"],
+                    "expect_refusal": False,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["pass_rate"] == 1.0
+    evaluation = client.app.state.rag_evaluation
+    assert evaluation.arguments["tenant_id"] == TENANT_ID
+    assert evaluation.arguments["user_id"] == USER_ID
+    assert evaluation.arguments["knowledge_base_ids"] == (KNOWLEDGE_BASE_ID,)
+    assert evaluation.arguments["cases"][0].question == "客户开户需要哪些资料？"
+    assert evaluation.arguments["cases"][0].expected_keywords == ("营业执照",)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"cases": []},
+        {"user_id": "not-a-uuid", "cases": [{"question": "测试"}]},
+        {"knowledge_base_ids": ["not-a-uuid"], "cases": [{"question": "测试"}]},
+        {"cases": [{"question": "   "}]},
+    ],
+)
+def test_admin_rag_evaluation_rejects_invalid_payload(payload: dict[str, object]) -> None:
+    client, _repository = build_client()
+
+    response = client.post(
+        "/internal/v1/admin/rag/evaluate",
+        headers=admin_headers(),
+        json=payload,
+    )
+
+    assert response.status_code in {400, 422}
+
+
 def test_admin_enqueues_document_reindex() -> None:
     client, repository = build_client()
 
@@ -434,5 +507,6 @@ def test_http_app_serves_console_and_protects_document_upload() -> None:
 
     assert page.status_code == 200
     assert "/admin/assets/app.js" in page.text
+    assert "RAG 评测" in page.text
     assert upload.status_code == 401
     assert upload.json() == {"detail": "invalid internal token"}

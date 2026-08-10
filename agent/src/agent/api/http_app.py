@@ -15,8 +15,10 @@ from agent.adapters.models import OpenAIEmbeddingClient, OpenAILLMClient
 from agent.adapters.object_store import MinioObjectStore
 from agent.adapters.repository import PostgresRepository
 from agent.api.admin_api import create_admin_dependency, create_admin_router
+from agent.application.evaluation import RagEvaluationService
 from agent.application.ingestion import DocumentIngestionService
 from agent.application.models import DependencyUnavailable, InvalidRequest, ResourceNotFound
+from agent.application.query import QueryService
 from agent.application.reindex import DocumentReindexWorker
 from agent.settings import Settings, get_settings
 
@@ -53,6 +55,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.object_store = object_store
         app.state.embedding = embedding
         app.state.llm = llm
+        query_service = QueryService(repository, embedding, llm, actual_settings)
+        app.state.rag_evaluation = RagEvaluationService(repository, query_service)
         app.state.ingestion = DocumentIngestionService(
             repository, object_store, embedding, actual_settings
         )
