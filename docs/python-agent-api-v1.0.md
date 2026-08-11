@@ -654,7 +654,7 @@ class LLMClient(Protocol):
 
 `LLMRequest` 至少包含：Prompt 消息、Prompt 版本、最大输出 Token、温度、截止时间和结构化输出 Schema。调用方不传任意模型 URL。
 
-MVP 默认模型配置为 `Qwen3.5-4B`，通过 Ollama 或 vLLM 的 OpenAI-compatible 接口接入。初始生成参数建议使用低温度确定性配置，最终值通过评测固定。
+MVP 默认模型配置为 `deepseek-v4-flash`，通过 OpenAI Python SDK 的 Responses API 接入并读取 `response.output_text`。通过 `LLM_API_MODE=chat_completions` 仍可切换到 Ollama 或 vLLM 等 OpenAI-compatible 本地模型。生成参数和候选数量通过评测固定。
 
 重试规则：
 

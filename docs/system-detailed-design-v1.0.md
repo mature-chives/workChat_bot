@@ -61,7 +61,7 @@
 | 关键词检索 | PostgreSQL 全文检索 | 中文分词策略需通过语料测试，可替换为 OpenSearch |
 | 队列与幂等 | Redis Streams | 接收消息、索引任务、重试、短期幂等和限流 |
 | 对象存储 | MinIO | 保存原始文档和解析产物；开发环境可使用兼容的本地实现 |
-| LLM | Qwen3.5-4B（默认配置） | 通过 Ollama 或 vLLM 的 OpenAI-compatible API 接入 |
+| LLM | deepseek-v4-flash（默认配置） | 通过 OpenAI Python SDK Responses API 接入；兼容 Chat Completions 模式 |
 | Embedding | bge-m3 | 模型版本和向量维度写入索引版本元数据 |
 | Reranker | bge-reranker-v2-m3 | 对已通过 ACL 过滤的候选片段重排 |
 

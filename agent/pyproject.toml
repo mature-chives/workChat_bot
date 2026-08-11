@@ -9,6 +9,7 @@ dependencies = [
   "grpcio>=1.70,<2",
   "httpx>=0.28,<1",
   "minio>=7.2,<8",
+  "openai>=1.68,<3",
   "openpyxl>=3.1,<4",
   "pydantic-settings>=2.7,<3",
   "protobuf>=6.31,<7",

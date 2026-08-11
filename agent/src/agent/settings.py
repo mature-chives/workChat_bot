@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,9 +24,12 @@ class Settings(BaseSettings):
     minio_secure: bool = Field(False, validation_alias="MINIO_SECURE")
     minio_bucket: str = Field("workchat-documents", validation_alias="MINIO_BUCKET")
 
-    llm_base_url: str | None = Field(None, validation_alias="LLM_BASE_URL")
-    llm_api_key: str = Field("local", validation_alias="LLM_API_KEY")
-    llm_model: str = Field("Qwen3.5-4B", validation_alias="LLM_MODEL")
+    llm_base_url: str | None = Field("https://api.deepseek.com", validation_alias="LLM_BASE_URL")
+    llm_api_key: str = Field("", validation_alias="LLM_API_KEY")
+    llm_model: str = Field("deepseek-v4-flash", validation_alias="LLM_MODEL")
+    llm_api_mode: Literal["responses", "chat_completions"] = Field(
+        "responses", validation_alias="LLM_API_MODE"
+    )
     embedding_base_url: str | None = Field(None, validation_alias="EMBEDDING_BASE_URL")
     embedding_api_key: str = Field("local", validation_alias="EMBEDDING_API_KEY")
     embedding_model: str = Field("bge-m3", validation_alias="EMBEDDING_MODEL")
@@ -38,11 +42,11 @@ class Settings(BaseSettings):
     retrieval_config_version: str = Field(
         "rag-default-v1", validation_alias="AGENT_RETRIEVAL_CONFIG_VERSION"
     )
-    top_k_keyword: int = Field(30, ge=1, le=100)
-    top_k_vector: int = Field(30, ge=1, le=100)
-    top_k_final: int = Field(8, ge=1, le=20)
-    llm_timeout_seconds: float = Field(8.0, gt=0, le=30)
-    embedding_timeout_seconds: float = Field(2.0, gt=0, le=10)
+    top_k_keyword: int = Field(10, ge=1, le=100)
+    top_k_vector: int = Field(20, ge=1, le=100)
+    top_k_final: int = Field(5, ge=1, le=20)
+    llm_timeout_seconds: float = Field(60.0, gt=0, le=60)
+    embedding_timeout_seconds: float = Field(30.0, gt=0, le=60)
     embedding_dimension: int = Field(1024, ge=1, le=8192)
     max_upload_bytes: int = Field(20 * 1024 * 1024, ge=1024)
     max_extracted_characters: int = Field(2_000_000, ge=1000)

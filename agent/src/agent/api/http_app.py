@@ -50,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             actual_settings.llm_api_key,
             actual_settings.llm_model,
             actual_settings.llm_timeout_seconds,
+            api_mode=actual_settings.llm_api_mode,
         )
         app.state.repository = repository
         app.state.object_store = object_store

@@ -28,6 +28,7 @@ async def serve() -> None:
         settings.llm_api_key,
         settings.llm_model,
         settings.llm_timeout_seconds,
+        api_mode=settings.llm_api_mode,
     )
     query_service = QueryService(repository, embedding, llm, settings)
     server = grpc.aio.server()

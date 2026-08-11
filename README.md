@@ -1,8 +1,8 @@
 # 企业微信智能知识 Agent
 
-面向企业内部知识问答的可运行 MVP：员工从企业微信提问，系统按照用户权限检索企业知识库，调用本地大模型生成带来源引用的回答，再发送回企业微信。
+面向企业内部知识问答的可运行 MVP：员工从企业微信提问，系统按照用户权限检索企业知识库，调用配置的大模型生成带来源引用的回答，再发送回企业微信。
 
-项目采用 Go + Python 的服务化结构，默认支持 PostgreSQL/pgvector、Redis、MinIO，以及 Ollama、vLLM 等 OpenAI-compatible 本地模型服务。
+项目采用 Go + Python 的服务化结构，默认使用 OpenAI Python SDK 的 Responses API 调用 `deepseek-v4-flash`，Embedding 仍可由 Ollama、vLLM 等 OpenAI-compatible 本地模型服务提供。
 
 ## 当前能力
 
@@ -12,7 +12,7 @@
 - Python gRPC Agent 服务
 - 用户、角色、部门及全员知识库 ACL 过滤
 - 中文 n-gram 关键词检索、pgvector 向量检索和 RRF 融合
-- Qwen、DeepSeek、Llama 等 OpenAI-compatible 模型接入
+- DeepSeek Responses API 默认接入，以及 Qwen、Llama 等 Chat Completions 兼容模式
 - 模型不可用时的抽取式降级回答
 - 回答、模型、检索配置和引用来源持久化
 - PDF、DOCX、XLSX、Markdown、TXT、CSV 文档上传与切片
@@ -34,7 +34,7 @@ flowchart LR
     DISPATCHER --> AGENT[Python Agent gRPC]
     AGENT --> DB
     AGENT --> EMB[Embedding / bge-m3]
-    AGENT --> LLM[本地 LLM]
+    AGENT --> LLM[DeepSeek / OpenAI-compatible LLM]
     DISPATCHER --> DONE[Redis qa.completed]
     DONE --> OUT[Go Outbound Worker]
     OUT --> WX
@@ -50,7 +50,7 @@ flowchart LR
 1. Gateway 验证并解密企业微信消息。
 2. 消息与用户身份写入 PostgreSQL，并发布 `qa.requested`。
 3. Dispatcher 调用 Agent gRPC 服务。
-4. Agent 根据实时 ACL 检索知识块，调用本地模型并保存答案、引用。
+4. Agent 根据实时 ACL 检索知识块，调用配置的大模型并保存答案、引用。
 5. Dispatcher 发布 `qa.completed`。
 6. Outbound Worker 将带来源的回答发送回企业微信。
 
@@ -71,7 +71,7 @@ flowchart LR
 cp .env.example .env
 ```
 
-不配置企业微信和模型也可以启动核心服务。此时企业微信入口关闭，模型调用失败时使用关键词检索与抽取式回答。
+不配置企业微信和 DeepSeek API Key 也可以启动核心服务，但 LLM 会显示为“尚未配置”。默认关闭抽取式降级，问答前需要配置 API Key；如明确接受原文片段降级，可自行开启 `AGENT_ALLOW_EXTRACTIVE_FALLBACK`。
 
 ### 2. 启动核心服务
 
@@ -146,25 +146,40 @@ make down
 
 `make down` 不删除 PostgreSQL、Redis 和 MinIO 数据卷。
 
-## 接入本地模型
+## 接入生成与向量模型
 
-Agent 使用 OpenAI-compatible API。默认连接宿主机的 `11434` 端口，适用于本机 Ollama：
+生成模型默认通过 OpenAI Python SDK 的 Responses API 调用 DeepSeek；API Key 只通过环境变量注入，不应写入代码或提交到仓库：
+
+```dotenv
+LLM_BASE_URL=https://api.deepseek.com
+LLM_API_KEY=你的_DeepSeek_API_Key
+LLM_MODEL=deepseek-v4-flash
+LLM_API_MODE=responses
+LLM_TIMEOUT_SECONDS=60
+
+EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1
+EMBEDDING_API_KEY=local
+EMBEDDING_MODEL=bge-m3:latest
+EMBEDDING_TIMEOUT_SECONDS=30
+
+TOP_K_FINAL=5
+AGENT_ALLOW_EXTRACTIVE_FALLBACK=false
+```
+
+`LLM_API_MODE=responses` 使用 `client.responses.create()` 并读取 `response.output_text`。如果切换回只支持 Chat Completions 的本地 Ollama 或 vLLM，可配置：
 
 ```dotenv
 LLM_BASE_URL=http://host.docker.internal:11434/v1
 LLM_API_KEY=local
-LLM_MODEL=Qwen3.5-4B
-
-EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1
-EMBEDDING_API_KEY=local
-EMBEDDING_MODEL=bge-m3
+LLM_MODEL=qwen3.5:4b
+LLM_API_MODE=chat_completions
 ```
 
-模型名称必须与本地实际部署的名称一致。使用 vLLM 或其他兼容服务时，只需替换 URL、API Key 和模型名。
+模型名称必须与实际服务中的名称一致。没有 `LLM_API_KEY` 时生成模型按未配置处理，不会向 DeepSeek 发送请求。
 
 Embedding 输出维度默认为 `1024`，应与数据库中的 `vector(1024)` 保持一致。
 
-后台“模型与索引”区域会实际调用 Embedding 接口并检查输出维度，同时通过 OpenAI-compatible `/models` 接口确认 LLM 是否存在。模型可用后，可以：
+后台“模型与索引”区域会实际调用 Embedding 接口并检查输出维度，同时通过 OpenAI SDK 的模型列表接口确认 LLM 是否存在。模型可用后，可以：
 
 - 在工作台或文档页点击“补齐向量”，仅处理当前版本中缺失向量的文档。
 - 在单个文档的列表或详情中点击“重建”，强制重新生成该文档当前版本的全部向量。

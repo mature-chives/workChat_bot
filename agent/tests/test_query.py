@@ -198,6 +198,33 @@ async def test_rrf_order_and_citations_are_renumbered() -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_answer_marker_is_added_from_structured_citation() -> None:
+    first = candidate(1, "第一份")
+    repository = FakeRepository(keyword=[first])
+    llm = FakeLLM(GeneratedAnswer("诺曼底属于法国。", (1,)))
+    service = QueryService(repository, FakeEmbedding(), llm, settings())
+
+    result = await service.answer(request())
+
+    assert result.answer == "诺曼底属于法国。 [1]"
+    assert [item.title for item in result.citations] == ["第一份"]
+
+
+@pytest.mark.asyncio
+async def test_answer_markers_are_normalized_and_drive_citations() -> None:
+    first = candidate(1, "第一份")
+    second = candidate(2, "第二份")
+    repository = FakeRepository(keyword=[first, second])
+    llm = FakeLLM(GeneratedAnswer("诺曼底属于法国【2】。", (1,)))
+    service = QueryService(repository, FakeEmbedding(), llm, settings())
+
+    result = await service.answer(request())
+
+    assert result.answer == "诺曼底属于法国[1]。"
+    assert [item.title for item in result.citations] == ["第二份"]
+
+
+@pytest.mark.asyncio
 async def test_llm_failure_uses_extractive_fallback() -> None:
     repository = FakeRepository(keyword=[candidate(1, "制度")])
     service = QueryService(

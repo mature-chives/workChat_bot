@@ -19,7 +19,7 @@ from agent.application.models import (
 from agent.settings import Settings
 
 _TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
-_CITATION_PATTERN = re.compile(r"\[(\d+)]")
+_CITATION_PATTERN = re.compile(r"(?:\[|【|［)\s*(\d+)\s*(?:\]|】|］)")
 _ALLOWED_CHANNELS = {"WECOM", "WEB", "EVAL"}
 _ALLOWED_REFUSALS = {
     "NO_RELEVANT_EVIDENCE",
@@ -241,19 +241,25 @@ def _validate_and_renumber(generated: GeneratedAnswer, candidate_count: int) -> 
             refusal_reason=reason,
         )
 
-    indexes = tuple(dict.fromkeys(generated.citation_indexes))
+    structured_indexes = tuple(dict.fromkeys(generated.citation_indexes))
+    marker_indexes = tuple(
+        dict.fromkeys(int(value) for value in _CITATION_PATTERN.findall(generated.answer))
+    )
+    indexes = marker_indexes or structured_indexes
     if not indexes or any(index < 1 or index > candidate_count for index in indexes):
         raise DependencyUnavailable("model returned invalid citations")
-    markers = {int(value) for value in _CITATION_PATTERN.findall(generated.answer)}
-    if markers != set(indexes):
-        raise DependencyUnavailable("answer citation markers do not match structured citations")
+
+    answer = generated.answer
+    if not marker_indexes:
+        markers = " ".join(f"[{index}]" for index in indexes)
+        answer = f"{answer.rstrip()} {markers}"
 
     mapping = {old: new for new, old in enumerate(indexes, start=1)}
 
     def replace_marker(match: re.Match[str]) -> str:
         return f"[{mapping[int(match.group(1))]}]"
 
-    answer = _CITATION_PATTERN.sub(replace_marker, generated.answer)
+    answer = _CITATION_PATTERN.sub(replace_marker, answer)
     return GeneratedAnswer(
         answer=answer,
         citation_indexes=indexes,
